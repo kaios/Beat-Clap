@@ -1,0 +1,94 @@
+"""UI strings (English / Japanese) and Japanese system-font discovery. Word prompts stay English."""
+import pygame
+
+LANGS = ("en", "ja")
+
+STRINGS = {
+    "en": {
+        "title": "BEAT CLAP",
+        "subtitle": "Clap once for every syllable, right on the beat.",
+        "start": "Start",
+        "language": "Language: English",
+        "voice": "Voice: {state}",
+        "no_voice": "Voice: no speech engine (install espeak-ng)",
+        "loading": "Preparing voice...",
+        "metronome": "Metronome click: {state}",
+        "on": "On",
+        "off": "Off",
+        "quit": "Quit",
+        "menu_hint": "UP/DOWN select   ENTER confirm   L language",
+        "mic": "Mic: {name} ({backend})",
+        "no_mic": "No microphone - press SPACE to clap",
+        "clap_test": "Clap to test your mic",
+        "clap_detected": "Clap detected!",
+        "score": "SCORE",
+        "combo": "COMBO",
+        "listen": "Listen to the word...",
+        "go": "Clap with each syllable!",
+        "play_hint": "SPACE clap   [ ] mic offset   M metronome   L language   ESC menu",
+        "offset": "Mic offset: {ms:+d} ms",
+        "early": "{ms:d} ms early",
+        "late": "{ms:d} ms late",
+        "results": "RESULTS",
+        "perfect": "Perfect",
+        "good": "Good",
+        "miss": "Miss",
+        "max_combo": "Max combo",
+        "accuracy": "Accuracy",
+        "final_score": "Score",
+        "results_hint": "ENTER play again   ESC menu",
+        "no_ja_font": "(No Japanese font found - install Noto Sans CJK)",
+    },
+    "ja": {
+        "title": "ビート・クラップ",
+        "subtitle": "音節ごとに、ビートに合わせて手をたたこう！",
+        "start": "スタート",
+        "language": "言語: 日本語",
+        "voice": "音声: {state}",
+        "no_voice": "音声: 音声エンジンなし (espeak-ng をインストール)",
+        "loading": "音声を準備中…",
+        "metronome": "メトロノーム音: {state}",
+        "on": "オン",
+        "off": "オフ",
+        "quit": "終了",
+        "menu_hint": "上下 選択   ENTER 決定   L 言語切替",
+        "mic": "マイク: {name} ({backend})",
+        "no_mic": "マイクなし - SPACEキーで手拍子",
+        "clap_test": "手をたたいてマイクをテスト",
+        "clap_detected": "手拍子を検出！",
+        "score": "スコア",
+        "combo": "コンボ",
+        "listen": "単語を聞こう…",
+        "go": "音節ごとに手をたたこう！",
+        "play_hint": "SPACE 手拍子   [ ] マイク補正   M メトロノーム   L 言語   ESC メニュー",
+        "offset": "マイク補正: {ms:+d} ms",
+        "early": "{ms:d} ms 早い",
+        "late": "{ms:d} ms 遅い",
+        "results": "結果",
+        "perfect": "パーフェクト",
+        "good": "グッド",
+        "miss": "ミス",
+        "max_combo": "最大コンボ",
+        "accuracy": "正確さ",
+        "final_score": "スコア",
+        "results_hint": "ENTER もう一度   ESC メニュー",
+        "no_ja_font": "(日本語フォントが見つかりません)",
+    },
+}
+
+# fontconfig-style names pygame.font.match_font understands, across Linux / macOS / Windows.
+JA_FONT_CANDIDATES = [
+    "notosanscjkjp", "notosansjp", "notosanscjk", "sourcehansansjp", "sourcehansans",
+    "ipaexgothic", "ipagothic", "ipapgothic", "takaogothic", "vlgothic",
+    "hiraginosans", "hiraginokakugothicpro", "hiraginokakugothicpron", "applesdgothicneo",
+    "yugothic", "yugothicui", "meiryo", "msgothic", "mspgothic",
+    "droidsansfallback", "droidsansjapanese", "unifont",
+]
+
+
+def find_japanese_font():
+    for name in JA_FONT_CANDIDATES:
+        path = pygame.font.match_font(name)
+        if path:
+            return path
+    return None
