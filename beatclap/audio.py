@@ -12,6 +12,7 @@ MIN_FLOOR = 0.002         # keeps the floor from collapsing to 0 on digitally si
 FLOOR_TAU_S = 0.75        # time constant of the ambient floor tracker
 WARMUP_S = 0.25           # initial ambient measurement before detection is armed
 VOICE_GUARD_RATIO = 1.5   # while the game is speaking, claps must beat its own voice by this much
+SUSTAIN_S = 0.3           # a level held above threshold this long is new ambience, not a clap
 
 
 def rms(block):
@@ -25,7 +26,9 @@ class ClapDetector:
     A trigger needs rms > floor * SPIKE_RATIO, at least COOLDOWN_S since the last
     trigger, and the level must have dropped back under threshold since then
     (so one long loud sound can't fire repeatedly). The floor only adapts on
-    quiet blocks so claps never inflate it.
+    quiet blocks so claps never inflate it, except when the level stays above
+    threshold for SUSTAIN_S: no clap lasts that long, so that's the room getting
+    louder (background music starting, a fan) and the floor follows it.
 
     The game's own speech can leak from speakers into the mic, so the detector also
     learns how loud that voice arrives: during a measure window (the spoken word
@@ -49,6 +52,8 @@ class ClapDetector:
         self._warm_n = 0
         self._last_trigger = float("-inf")
         self._armed = True
+        self._above_since = None
+        self._rewarm_request = None
         # Written from the game thread, read in the audio thread (plain float swaps).
         self.measure_from = self.measure_until = float("-inf")
         self.guard_from = self.guard_until = float("-inf")
@@ -73,8 +78,17 @@ class ClapDetector:
     def guard_voice(self, start, end):
         self.guard_from, self.guard_until = start, end
 
+    def rewarm(self, seconds=1.0):
+        """Re-measure the ambient floor from scratch, e.g. when background music starts.
+        Applied by the audio thread on its next block so the reset never races it."""
+        self._rewarm_request = seconds
+
     def process(self, level, t, block_s):
         self.level = level
+        if self._rewarm_request is not None:
+            self.warmup_s, self._rewarm_request = self._rewarm_request, None
+            self._warm_elapsed, self._warm_sum, self._warm_n = 0.0, 0.0, 0
+            self._above_since = None
         if not self.ready:
             self._warm_elapsed += block_s
             self._warm_sum += level
@@ -92,12 +106,17 @@ class ClapDetector:
         if guarded:
             threshold = max(threshold, self.voice_threshold)
         if level > threshold:
+            if self._above_since is None:
+                self._above_since = t
+            if not guarded and t - self._above_since >= SUSTAIN_S:
+                self.floor += min(1.0, block_s / self.tau_s) * (level - self.floor)
             if self._armed and t - self._last_trigger >= self.cooldown_s:
                 self._last_trigger = t
                 self._armed = False
                 return True
             return False
         self._armed = True
+        self._above_since = None
         if not guarded:  # the game's own voice isn't room ambience
             self.floor += min(1.0, block_s / self.tau_s) * (level - self.floor)
         return False

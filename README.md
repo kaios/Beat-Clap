@@ -4,7 +4,19 @@ A rhythm game for practicing English syllables. Each word is shown split into
 syllables (`RO-BOT`, `U-NI-VER-SI-TY`), and each syllable is a node on a rail
 that scrolls at **100 BPM**. The game says the whole word once, then speaks it
 again one syllable per beat. Clap into your microphone along with each
-syllable as its node crosses the hit ring. Everything (shapes, metronome click, fonts) is generated in code
+syllable as its node crosses the hit ring.
+
+There are five stages, each with its own background song, and the words get
+longer as you go. Match 60% of a stage's syllables to clear it and move on to
+the next.
+
+| # | Stage | Words | Music |
+|---|---|---|---|
+| 1 | Sunny Start | 1–2 syllables | C major pluck pop |
+| 2 | Bubble Pop | 2–3 syllables | F major chiptune with arpeggios |
+| 3 | Midnight Funk | 3 syllables | E dorian funk: slap bass, clav, organ |
+| 4 | Island Breeze | 3–4 syllables | G major tropical marimba with offbeat organ |
+| 5 | Neon Finale | 4–5 syllables | A minor synthwave: saw lead, pad, arpeggios | Everything (shapes, metronome click, fonts) is generated in code
 or comes from the system. There are no asset files.
 
 ## Run
@@ -42,18 +54,21 @@ The maintainer field comes from your git identity; override it with
 | Clap detector | `ClapDetector` | Fires when `rms > ambient_floor * 2.5`, then blocks for **150 ms**. The level must also fall back below threshold before the next clap, so one sustained noise counts once. The floor adapts only on quiet blocks. |
 | Voice | `beatclap/voice.py`, `words.SPOKEN` | The word is spoken on beat 1 of its read bar. Each syllable is spoken so its vowel onset (where the loudness first reaches half its peak) lands on the node. Syllables use respellings (`U-NI-VER-SI-TY` is spoken as `you-nih-ver-sih-tee`) so TTS doesn't read letter names. |
 | Self-trigger guard | `ClapDetector.measure_voice` / `guard_voice` | While the word preview plays, the detector records how loud the game's voice is at the mic (no claps register then). While a syllable plays, a clap must be 1.5× louder than that, so speaker output can't score points by itself. |
+| Music | `beatclap/music.py`, `beatclap/stages.py` | Each song is an 8-bar loop at exactly 100 BPM, synthesized with numpy when the stage starts. Sample 0 is beat 0, so the music stays locked to the rail. It plays on its own mixer channel and peaks at about a third of the voice's level. |
+| Music vs. the mic | `music.tame_transients`, `ClapDetector.rewarm` | Hits whose 5 ms RMS rises more than 1.6× above the loop's running average get softened, so drums can never reach the detector's 2.5× threshold. When a stage starts, the detector re-learns the background level with the music playing. If the room stays louder for 0.3 s or more (a fan, for example), the floor follows it instead of getting stuck. |
 | Chart | `beatclap/core.py` `build_chart` | Each word gets one read bar, then one syllable per beat starting on the next downbeat, padded to whole bars. |
 | Judging | `judge`, `Session` | Each syllable matched by a clap scores **1 point**. The flash shows timing: ±75 ms is **PERFECT**, ±150 ms is **GOOD**. A missed syllable or a clap outside every window resets the combo. |
 | UI / i18n | `beatclap/game.py`, `beatclap/i18n.py` | Press **L** anywhere to switch English / 日本語. Word prompts always stay English. A Japanese system font is picked automatically (Noto CJK, IPA, Hiragino, Yu Gothic, Meiryo, ...). |
 
 ## Controls
 
-`SPACE` clap (keyboard) · `[` / `]` mic latency offset ±5 ms · `M` metronome
+Menu: `UP`/`DOWN` select, `LEFT`/`RIGHT` choose stage, `ENTER` confirm.
+In play: `SPACE` clap (keyboard) · `[` / `]` mic latency offset ±5 ms · `M` metronome
 click · `L` language · `ESC` menu
 
 **Tip:** Headphones work best, since the mic then hears only your claps. On
 speakers, keep the volume moderate so your claps are clearly louder than the
-voice. The metronome click is off by default for the same reason. If your judgements
+voice and music. The metronome click is off by default for the same reason. If your judgements
 are consistently "late", lower the mic offset with `[`.
 
 ## Tests

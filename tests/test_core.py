@@ -2,8 +2,9 @@ import unittest
 
 import numpy as np
 
-from beatclap import core, voice
-from beatclap.audio import ClapDetector
+from beatclap import core, music, voice
+from beatclap.audio import ClapDetector, rms
+from beatclap.stages import STAGES
 from beatclap.words import WORDS, spoken_syllables
 
 BLOCK = 0.005  # 5 ms audio blocks
@@ -147,6 +148,68 @@ class DetectorTest(unittest.TestCase):
             det.process(peak, start, BLOCK)
             det.process(0.01, start + 0.2, BLOCK)
         self.assertAlmostEqual(det.voice_threshold, 0.3)
+
+    def test_recovers_when_room_gets_permanently_louder(self):
+        det = ClapDetector()
+        t = warm(det, 0.01)
+        fired = [det.process(0.1, t + i * BLOCK, BLOCK) for i in range(600)]  # 3 s of fan noise
+        self.assertEqual(sum(fired), 1)                    # only the onset looked like a clap
+        self.assertGreater(det.floor, 0.08)                # floor followed the new ambience
+        t += 600 * BLOCK
+        self.assertTrue(det.process(0.5, t, BLOCK))        # claps work again over the noise
+
+    def test_rewarm_relearns_floor_without_triggering(self):
+        det = ClapDetector()
+        t = warm(det, 0.01)
+        det.rewarm(0.5)
+        fired = [det.process(0.1, t + i * BLOCK, BLOCK) for i in range(100)]
+        self.assertFalse(any(fired))
+        self.assertAlmostEqual(det.floor, 0.1)
+
+
+class MusicTest(unittest.TestCase):
+    SR = 22050
+
+    @classmethod
+    def setUpClass(cls):
+        cls.loops = [music.render(st.song, cls.SR) for st in STAGES]
+
+    def test_loop_is_exactly_eight_bars_at_100_bpm(self):
+        for x in self.loops:
+            self.assertEqual(len(x), round(8 * 4 * 0.6 * self.SR))
+
+    def test_songs_are_distinct_and_quieter_than_voice(self):
+        for i, x in enumerate(self.loops):
+            self.assertLessEqual(float(np.max(np.abs(x))), music.PEAK + 1e-6)
+            for y in self.loops[i + 1:]:
+                self.assertLess(abs(np.corrcoef(x, y)[0, 1]), 0.5)
+
+    def test_music_never_looks_like_a_clap(self):
+        block = 128
+        for st, x in zip(STAGES, self.loops):
+            for level in (0.05, 1.0):
+                det = ClapDetector()
+                y = np.tile(x, 2) * level
+                fired = sum(det.process(rms(y[i:i + block]), i / self.SR, block / self.SR)
+                            for i in range(0, len(y) - block, block))
+                self.assertEqual(fired, 0, st.name["en"])
+
+    def test_melodies_cover_eight_bars(self):
+        for st in STAGES:
+            self.assertEqual(len(st.song.melody.split()), 8 * 8, st.name["en"])
+
+
+class StageTest(unittest.TestCase):
+    def test_pools_match_syllable_ranges_and_get_harder(self):
+        prev_hi = 0
+        for st in STAGES:
+            lo, hi = st.syllables
+            self.assertGreaterEqual(len(st.pool()), 8, st.name["en"])
+            for w in st.pool():
+                self.assertTrue(lo <= len(w.split("-")) <= hi)
+            self.assertGreaterEqual(hi, prev_hi)
+            prev_hi = hi
+            self.assertTrue(st.name["en"] and st.name["ja"])
 
 
 class VoiceTest(unittest.TestCase):

@@ -1,4 +1,4 @@
-"""Pygame front end: menu, scrolling 100 BPM rail, clap judgement flashes, results."""
+"""Pygame front end: menu, stages, scrolling 100 BPM rail, music, judgement flashes, results."""
 import math
 import random
 import time
@@ -6,10 +6,11 @@ import time
 import numpy as np
 import pygame
 
-from . import core, i18n
+from . import core, i18n, music
 from .audio import MicListener
+from .stages import CLEAR_RATIO, STAGES
 from .voice import Voice
-from .words import WORDS, spoken_syllables
+from .words import spoken_syllables
 
 W, H = 1280, 720
 HIT_X = 260
@@ -18,9 +19,11 @@ PX_PER_MS = 0.32            # 192 px per beat
 NODE_R = 26
 FLASH_MS = 550
 AUDIO_GRACE_MS = 60
-VOICE_LEAD_MS = 20          # start speech this early to cover mixer output latency
+OUTPUT_LATENCY_MS = 20      # mixer output latency: sounds start this early to be heard on time
 VOICE_GUARD_MARGIN_MS = 80  # extra time either side of a clip for speaker-to-mic delay
-MENU = ("start", "language", "voice", "metronome", "quit")
+MUSIC_VOLUME = 0.5          # music peaks at 0.25 after this, well under the voice's 0.8
+MUSIC_REWARM_S = 1.0        # let the clap detector re-learn the room once music starts
+MENU = ("start", "stage", "language", "voice", "music", "metronome", "quit")
 
 BG = (14, 17, 30)
 RAIL = (60, 68, 98)
@@ -97,7 +100,7 @@ class Flash:
 
 
 class Game:
-    def __init__(self, device=None, lang="en", num_words=10):
+    def __init__(self, device=None, lang="en", num_words=8):
         pygame.mixer.pre_init(44100, -16, 2, 256)
         pygame.init()
         pygame.display.set_caption("Beat Clap")
@@ -110,13 +113,21 @@ class Game:
         self.menu_index = 0
         self.metronome = False
         self.voice_on = True
+        self.music_on = True
+        self.stage_index = 0
+        self.cleared = False
         self.offset_ms = 0
         self.last_clap_wall = -10.0
         self.session = None
 
         self.clicks = None
+        self.music_channel = None
+        self._music_cache = {}
         if pygame.mixer.get_init():
             self.clicks = (make_click(1760), make_click(1175, volume=0.35))
+            pygame.mixer.set_reserved(1)  # channel 0 is the music's alone
+            self.music_channel = pygame.mixer.Channel(0)
+            self.music_channel.set_volume(MUSIC_VOLUME)
         self.voice = Voice()
 
         self.mic = MicListener(device=device)
@@ -182,12 +193,16 @@ class Game:
                 self.menu_index = (self.menu_index + 1) % len(MENU)
             elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 self.menu_select()
+            elif event.key in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_a, pygame.K_d):
+                step = 1 if event.key in (pygame.K_RIGHT, pygame.K_d) else -1
+                self.stage_index = (self.stage_index + step) % len(STAGES)
             elif event.key == pygame.K_SPACE:
                 self.last_clap_wall = time.perf_counter()
             elif event.key == pygame.K_ESCAPE:
                 self.state = "quit"
         elif self.state == "play":
             if event.key == pygame.K_ESCAPE:
+                self.stop_music()
                 self.state = "menu"
             elif event.key == pygame.K_SPACE:
                 self.on_clap(self.now_ms())
@@ -199,6 +214,10 @@ class Game:
                 self.offset_ms += 5
         elif self.state == "results":
             if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                if self.cleared:
+                    self.stage_index = (self.stage_index + 1) % len(STAGES)
+                self.start_session()
+            elif event.key == pygame.K_r:
                 self.start_session()
             elif event.key == pygame.K_ESCAPE:
                 self.state = "menu"
@@ -207,10 +226,14 @@ class Game:
         item = MENU[self.menu_index]
         if item == "start":
             self.start_session()
+        elif item == "stage":
+            self.stage_index = (self.stage_index + 1) % len(STAGES)
         elif item == "language":
             self.lang = "ja" if self.lang == "en" else "en"
         elif item == "voice":
             self.voice_on = not self.voice_on
+        elif item == "music":
+            self.music_on = not self.music_on
         elif item == "metronome":
             self.metronome = not self.metronome
         else:
@@ -218,33 +241,62 @@ class Game:
 
     # ---------- session ----------
 
+    @property
+    def stage(self):
+        return STAGES[self.stage_index]
+
+    def stage_label(self):
+        return self.tr("stage", n=self.stage_index + 1, name=self.stage.name[self.lang])
+
     def start_session(self):
-        words = random.sample(WORDS, min(self.num_words, len(WORDS)))
+        pool = self.stage.pool()
+        words = random.sample(pool, min(self.num_words, len(pool)))
         self.session = core.Session(core.build_chart(words))
+        self.screen.fill(BG)
+        self.blit_center(self.ui_text(36, self.stage_label(), CYAN), W / 2, H / 2 - 30)
+        self.blit_center(self.ui_text(24, self.tr("loading"), DIM), W / 2, H / 2 + 20)
+        pygame.display.flip()
         self.cues = self.build_voice_cues() if self.voice_on and self.voice.available else []
+        song = self.stage_music() if self.music_on and self.music_channel else None
         self.cue_index = 0
         self.flashes = []
         self.last_beat = -1
         self.beat_pulse_at = -1e9
+        self.cleared = False
         self.drain_mic()
-        self.t0 = time.perf_counter()
+        if song:
+            # Sample 0 of the loop is beat 0; it's heard OUTPUT_LATENCY_MS after play().
+            self.music_channel.play(song, loops=-1)
+            self.mic.detector.rewarm(MUSIC_REWARM_S)
+        self.t0 = time.perf_counter() + OUTPUT_LATENCY_MS / 1000.0
         self.state = "play"
+
+    def stage_music(self):
+        if self.stage_index not in self._music_cache:
+            rate, _, channels = pygame.mixer.get_init()
+            pcm = (music.render(self.stage.song, rate) * 32767).astype(np.int16)
+            if channels > 1:
+                pcm = np.repeat(pcm[:, None], channels, axis=1)
+            self._music_cache[self.stage_index] = pygame.sndarray.make_sound(
+                np.ascontiguousarray(pcm))
+        return self._music_cache[self.stage_index]
+
+    def stop_music(self, fade_ms=300):
+        if self.music_channel:
+            self.music_channel.fadeout(fade_ms)
 
     def build_voice_cues(self):
         """The whole word is spoken on the first beat of its read bar, then each
         syllable is spoken so its vowel onset lands exactly on its node."""
-        self.screen.fill(BG)
-        self.blit_center(self.ui_text(30, self.tr("loading"), DIM), W / 2, H / 2)
-        pygame.display.flip()
         cues = []
         for seg in self.session.segments:
             word = self.voice.clip(seg.word.replace("-", "").lower(), syllable=False)
             if word:
-                cues.append((seg.start_ms - word.onset_ms - VOICE_LEAD_MS, word, True))
+                cues.append((seg.start_ms - word.onset_ms - OUTPUT_LATENCY_MS, word, True))
             for tgt, text in zip(seg.targets, spoken_syllables(seg.word)):
                 clip = self.voice.clip(text)
                 if clip:
-                    cues.append((tgt.time_ms - clip.onset_ms - VOICE_LEAD_MS, clip, False))
+                    cues.append((tgt.time_ms - clip.onset_ms - OUTPUT_LATENCY_MS, clip, False))
         cues.sort(key=lambda c: c[0])
         return cues
 
@@ -276,7 +328,11 @@ class Game:
 
     def update_play(self):
         for clap_wall in self.drain_mic():
-            self.on_clap((clap_wall - self.t0) * 1000.0 - self.offset_ms)
+            clap_ms = (clap_wall - self.t0) * 1000.0 - self.offset_ms
+            # The lead-in has nothing to hit, and it's where the music's onset could
+            # slip past the detector before it re-learns the room; don't count it.
+            if clap_ms >= self.session.segments[0].start_ms:
+                self.on_clap(clap_ms)
 
         now = self.now_ms()
         self.play_due_cues(now)
@@ -294,6 +350,9 @@ class Game:
 
         self.flashes = [f for f in self.flashes if now - f.born < FLASH_MS]
         if now > self.session.end_ms + core.BEAT_MS:
+            total = len(self.session.targets)
+            self.cleared = self.session.scorer.score >= math.ceil(total * CLEAR_RATIO)
+            self.stop_music(1500)
             self.state = "results"
 
     # ---------- drawing ----------
@@ -328,23 +387,25 @@ class Game:
             pygame.draw.circle(self.screen, GOLD, (x - 22, y + h // 2), r, 2)
 
     def draw_menu(self):
-        self.blit_center(self.ui_text(84, self.tr("title"), CYAN), W / 2, 150)
-        self.blit_center(self.ui_text(26, self.tr("subtitle"), DIM), W / 2, 225)
+        self.blit_center(self.ui_text(84, self.tr("title"), CYAN), W / 2, 105)
+        self.blit_center(self.ui_text(26, self.tr("subtitle"), DIM), W / 2, 172)
         if self.lang == "ja" and not self.fonts.ja_path:
-            self.blit_center(self.en_font(20).render(self.tr("no_ja_font"), True, RED), W / 2, 260)
+            self.blit_center(self.en_font(20).render(self.tr("no_ja_font"), True, RED), W / 2, 205)
 
         items = [
             self.tr("start"),
+            f"<  {self.stage_label()}  >",
             self.tr("language"),
             self.tr("voice", state=self.tr("on" if self.voice_on else "off"))
             if self.voice.available else self.tr("no_voice"),
+            self.tr("music", state=self.tr("on" if self.music_on else "off")),
             self.tr("metronome", state=self.tr("on" if self.metronome else "off")),
             self.tr("quit"),
         ]
         for i, label in enumerate(items):
             sel = i == self.menu_index
-            surf = self.ui_text(36, label, GOLD if sel else TEXT)
-            cy = 300 + i * 54
+            surf = self.ui_text(32, label, GOLD if sel else TEXT)
+            cy = 250 + i * 46
             self.blit_center(surf, W / 2, cy)
             if sel:
                 r = surf.get_rect(center=(W // 2, cy))
@@ -441,6 +502,7 @@ class Game:
         self.screen.blit(big.render(f"{sc.score:,}", True, TEXT), (24, 40))
         self.screen.blit(self.ui_text(20, self.tr("combo"), DIM), (230, 18))
         self.screen.blit(big.render(str(sc.combo), True, TEXT), (230, 40))
+        self.blit_center(self.ui_text(22, self.stage_label(), DIM), W / 2, 34)
         self.draw_mic_meter(W - 280, 26)
         if self.mic.backend:
             off = self.ui_text(16, self.tr("offset", ms=self.offset_ms), DIM)
@@ -470,7 +532,17 @@ class Game:
         sc = self.session.scorer
         total = len(self.session.targets) or 1
         accuracy = (sc.counts[core.PERFECT] + 0.5 * sc.counts[core.GOOD]) / total * 100
-        self.blit_center(self.ui_text(72, self.tr("results"), CYAN), W / 2, 120)
+        if not self.cleared:
+            title, color, hint = "try_again", RED, "hint_retry"
+        elif self.stage_index == len(STAGES) - 1:
+            title, color, hint = "all_clear", GOLD, "hint_done"
+        else:
+            title, color, hint = "stage_clear", GREEN, "hint_next"
+        self.blit_center(self.ui_text(64, self.tr(title), color), W / 2, 90)
+        self.blit_center(self.ui_text(24, self.stage_label(), DIM), W / 2, 145)
+        need = math.ceil(len(self.session.targets) * CLEAR_RATIO)
+        self.blit_center(self.ui_text(20, self.tr("clear_need", need=need, total=len(self.session.targets)),
+                                      DIM), W / 2, 178)
         rows = [
             (self.tr("final_score"), f"{sc.score} / {len(self.session.targets)}", TEXT),
             (self.tr("perfect"), str(sc.counts[core.PERFECT]), GOLD),
@@ -480,9 +552,9 @@ class Game:
             (self.tr("accuracy"), f"{accuracy:.1f}%", TEXT),
         ]
         for i, (label, value, color) in enumerate(rows):
-            y = 230 + i * 58
+            y = 240 + i * 56
             l = self.ui_text(34, label, DIM)
             self.screen.blit(l, l.get_rect(midright=(W // 2 - 30, y)))
             v = self.en_font(40).render(value, True, color)
             self.screen.blit(v, v.get_rect(midleft=(W // 2 + 30, y)))
-        self.blit_center(self.ui_text(22, self.tr("results_hint"), DIM), W / 2, H - 60)
+        self.blit_center(self.ui_text(22, self.tr(hint), DIM), W / 2, H - 50)
