@@ -23,6 +23,17 @@ runtime: `espeak-ng` / `espeak` on Linux (`sudo apt install espeak-ng`), `say`
 on macOS, or `pip install pyttsx3` on Windows. If none is found, the game runs
 silently.
 
+## Debian package
+
+```bash
+./packaging/build-deb.sh                      # -> dist/beat-clap_0.1.0_all.deb
+sudo apt install ./dist/beat-clap_0.1.0_all.deb
+beat-clap
+```
+
+The maintainer field comes from your git identity; override it with
+`DEBFULLNAME` / `DEBEMAIL`, and the version with `VERSION=0.2.0`.
+
 ## How it works
 
 | Piece | Where | Details |
