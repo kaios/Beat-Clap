@@ -46,6 +46,20 @@ beat-clap
 The maintainer field comes from your git identity; override it with
 `DEBFULLNAME` / `DEBEMAIL`, and the version with `VERSION=0.2.0`.
 
+## Windows .exe
+
+```bash
+./packaging/build-exe.sh        # Linux: builds dist/BeatClap.exe under Wine
+```
+
+The first run sets up a separate Wine prefix in `build/wine` with Windows Python
+3.11 and the pinned dependencies (it needs network access). Later runs reuse it.
+On Windows itself, install the same packages and run `py packaging\build_exe.py`.
+
+The exe is a single 33 MB file with Python and all libraries bundled. It uses the
+Windows voice (SAPI) for speech and Japanese fonts that come with Windows (Yu
+Gothic, Meiryo, MS Gothic).
+
 ## How it works
 
 | Piece | Where | Details |
