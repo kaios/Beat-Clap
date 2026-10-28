@@ -88,6 +88,51 @@ class UITest(unittest.TestCase):
                 g.mic.history[i] = (t, 0.03)
         self.assertEqual(g.measure_calibration()["threshold"], 1.5)
 
+    def tap(self, x, y):
+        import pygame
+        self.g.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(x, y)))
+
+    def row_y(self, item):
+        return game.MENU_Y + game.MENU.index(item) * game.MENU_STEP
+
+    def test_touch_menu_rows_and_arrows(self):
+        g = self.g
+        self.tap(game.W - 300, self.row_y("stage"))           # ">" end of the stage row
+        self.assertEqual(g.stage_index, 1)
+        self.tap(300, self.row_y("stage"))                    # "<" end
+        self.assertEqual(g.stage_index, 0)
+        self.tap(300, self.row_y("threshold"))
+        self.assertEqual(g.mic.detector.ratio, 2.4)
+        self.tap(game.W // 2, self.row_y("threshold"))        # middle of threshold: no reset
+        self.assertEqual(g.mic.detector.ratio, 2.4)
+        self.tap(game.W // 2, self.row_y("start"))
+        self.assertEqual(g.state, "play")
+
+    def test_touch_results_buttons_and_tap_to_clap(self):
+        g = self.g
+        g.start_session()
+        tgt = g.session.targets[0]
+        g.t0 = time.perf_counter() - tgt.time_ms / 1000
+        self.tap(640, 400)                                    # no mic: a tap is a clap
+        self.assertEqual(g.session.scorer.score, 1)
+        g.t0 -= (g.session.end_ms + 1000) / 1000
+        g.update_play()
+        self.draw()                                           # lays out the buttons
+        labels = len(g.buttons)
+        self.assertEqual(labels, 2)                           # failed: Retry, Menu
+        menu_rect = g.buttons[-1][0]
+        self.tap(*menu_rect.center)
+        self.assertEqual(g.state, "menu")
+
+    def test_android_layout_draws_every_screen(self):
+        old = game.ON_ANDROID
+        game.ON_ANDROID = True
+        try:
+            self.test_every_screen_draws_with_and_without_mic()
+            self.assertTrue(self.g.buttons)                   # last screen drew buttons
+        finally:
+            game.ON_ANDROID = old
+
     def test_settings_round_trip(self):
         g = self.g
         g.lang, g.offset_ms, g.mic.detector.ratio = "ja", 35, 1.8

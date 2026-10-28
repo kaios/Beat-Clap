@@ -1,4 +1,6 @@
 """UI strings (English / Japanese) and Japanese system-font discovery. Word prompts stay English."""
+import os
+
 import pygame
 
 LANGS = ("en", "ja")
@@ -17,6 +19,16 @@ STRINGS = {
         "off": "Off",
         "quit": "Quit",
         "menu_hint": "UP/DOWN select   LEFT/RIGHT change   ENTER confirm   L language",
+        "menu_hint_touch": "Tap an option   Tap < or > to change",
+        "no_mic_touch": "No microphone - tap the screen to clap",
+        "btn_next": "Next stage",
+        "btn_retry": "Retry",
+        "btn_menu": "Menu",
+        "btn_stage1": "Stage 1",
+        "btn_save": "Save",
+        "btn_try_again": "Try again",
+        "btn_cancel": "Cancel",
+        "btn_back": "Back",
         "mic_check": "Mic check",
         "mic_check_none": "Mic check (no microphone)",
         "threshold": "Clap threshold: {x:.1f}x room noise",
@@ -75,6 +87,16 @@ STRINGS = {
         "off": "オフ",
         "quit": "終了",
         "menu_hint": "上下 選択   左右 変更   ENTER 決定   L 言語切替",
+        "menu_hint_touch": "項目をタップ   < か > で変更",
+        "no_mic_touch": "マイクなし - 画面をタップして手拍子",
+        "btn_next": "次のステージ",
+        "btn_retry": "やり直し",
+        "btn_menu": "メニュー",
+        "btn_stage1": "ステージ1へ",
+        "btn_save": "保存",
+        "btn_try_again": "もう一度",
+        "btn_cancel": "キャンセル",
+        "btn_back": "戻る",
         "mic_check": "マイクチェック",
         "mic_check_none": "マイクチェック (マイクなし)",
         "threshold": "手拍子のしきい値: 周囲の音の{x:.1f}倍",
@@ -132,7 +154,18 @@ JA_FONT_CANDIDATES = [
 ]
 
 
+# Android has no fontconfig, so match_font can't search; these are its stock CJK fonts.
+JA_FONT_PATHS = [
+    "/system/fonts/NotoSansCJK-Regular.ttc", "/system/fonts/NotoSansJP-Regular.otf",
+    "/system/fonts/NotoSansCJKjp-Regular.otf", "/system/fonts/DroidSansJapanese.ttf",
+    "/system/fonts/DroidSansFallback.ttf",
+]
+
+
 def find_japanese_font():
+    for path in JA_FONT_PATHS:
+        if os.path.exists(path):
+            return path
     for name in JA_FONT_CANDIDATES:
         path = pygame.font.match_font(name)
         if path:

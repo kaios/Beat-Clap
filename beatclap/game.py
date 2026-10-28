@@ -7,6 +7,7 @@ import numpy as np
 import pygame
 
 from . import core, i18n, music, settings
+from .device import ON_ANDROID
 from .audio import MIN_FLOOR, MicListener
 from .stages import CLEAR_RATIO, STAGES
 from .voice import Voice
@@ -28,6 +29,8 @@ THRESHOLD_MIN, THRESHOLD_MAX = 1.3, 3.0
 # Mic check timeline, in beats: 2 lead-in, a spoken 4 count, then 8 claps.
 CAL_COUNT_FROM, CAL_CLAP_FROM, CAL_CLAPS = 2, 6, 8
 CAL_WINDOW_MS = 250
+MENU_Y, MENU_STEP = 200, 40     # menu rows: centre of the first, spacing
+BUTTON_W, BUTTON_H = 250, 58
 
 BG = (14, 17, 30)
 RAIL = (60, 68, 98)
@@ -108,7 +111,10 @@ class Game:
         pygame.mixer.pre_init(44100, -16, 2, 256)
         pygame.init()
         pygame.display.set_caption("Beat Clap")
-        self.screen = pygame.display.set_mode((W, H))
+        # Phones: fill the screen, letterboxed; SDL maps touches back to 1280x720 coordinates.
+        flags = pygame.SCALED | pygame.FULLSCREEN if ON_ANDROID else 0
+        self.screen = pygame.display.set_mode((W, H), flags)
+        self.buttons = []  # (rect, action) drawn this frame, for taps
         self.clock = pygame.time.Clock()
         self.fonts = Fonts()
         saved = settings.load()
@@ -182,6 +188,7 @@ class Game:
                 if self.state == "quit":
                     break
                 self.screen.fill(BG)
+                self.buttons = []
                 getattr(self, f"draw_{self.state}")()
                 pygame.display.flip()
                 self.clock.tick(144)
@@ -193,64 +200,94 @@ class Game:
     def handle_event(self, event):
         if event.type == pygame.QUIT:
             self.state = "quit"
-            return
-        if event.type != pygame.KEYDOWN:
-            return
-        if event.key == pygame.K_l:
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            self.handle_tap(event.pos)  # SDL turns touches into mouse events too
+        elif event.type == pygame.KEYDOWN:
+            self.handle_key(pygame.K_ESCAPE if event.key == pygame.K_AC_BACK else event.key)
+
+    def handle_key(self, key):
+        if key == pygame.K_l:
             self.lang = "ja" if self.lang == "en" else "en"
             return
         if self.state == "menu":
-            if event.key in (pygame.K_UP, pygame.K_w):
+            if key in (pygame.K_UP, pygame.K_w):
                 self.menu_index = (self.menu_index - 1) % len(MENU)
-            elif event.key in (pygame.K_DOWN, pygame.K_s):
+            elif key in (pygame.K_DOWN, pygame.K_s):
                 self.menu_index = (self.menu_index + 1) % len(MENU)
-            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 self.menu_select()
-            elif event.key in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_a, pygame.K_d):
-                step = 1 if event.key in (pygame.K_RIGHT, pygame.K_d) else -1
-                if MENU[self.menu_index] == "threshold":
-                    det = self.mic.detector
-                    det.ratio = round(min(THRESHOLD_MAX, max(THRESHOLD_MIN, det.ratio + 0.1 * step)), 1)
-                else:
-                    self.stage_index = (self.stage_index + step) % len(STAGES)
-            elif event.key == pygame.K_SPACE:
+            elif key in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_a, pygame.K_d):
+                self.menu_step(1 if key in (pygame.K_RIGHT, pygame.K_d) else -1)
+            elif key == pygame.K_SPACE:
                 self.last_clap_wall = time.perf_counter()
-            elif event.key == pygame.K_ESCAPE:
+            elif key == pygame.K_ESCAPE:
                 self.state = "quit"
         elif self.state == "play":
-            if event.key == pygame.K_ESCAPE:
-                self.stop_music()
-                self.state = "menu"
-            elif event.key == pygame.K_SPACE:
+            if key == pygame.K_ESCAPE:
+                self.to_menu()
+            elif key == pygame.K_SPACE:
                 self.on_clap(self.now_ms())
-            elif event.key == pygame.K_m:
+            elif key == pygame.K_m:
                 self.metronome = not self.metronome
-            elif event.key == pygame.K_LEFTBRACKET:
+            elif key == pygame.K_LEFTBRACKET:
                 self.offset_ms -= 5
-            elif event.key == pygame.K_RIGHTBRACKET:
+            elif key == pygame.K_RIGHTBRACKET:
                 self.offset_ms += 5
         elif self.state == "calibrate":
-            if event.key == pygame.K_ESCAPE:
-                self.stop_music()
-                self.state = "menu"
-            elif event.key == pygame.K_r:
+            if key == pygame.K_ESCAPE:
+                self.to_menu()
+            elif key == pygame.K_r:
                 self.start_calibration()
-            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and self.cal.get("result"):
-                result = self.cal["result"]
-                if "threshold" in result:
-                    self.mic.detector.ratio = result["threshold"]
-                    self.offset_ms = result["offset"]
-                    self.save_settings()
-                self.state = "menu"
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER) and self.cal.get("result"):
+                self.save_calibration()
         elif self.state == "results":
-            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                if self.cleared:
-                    self.stage_index = (self.stage_index + 1) % len(STAGES)
+            if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self.results_continue()
+            elif key == pygame.K_r:
                 self.start_session()
-            elif event.key == pygame.K_r:
-                self.start_session()
-            elif event.key == pygame.K_ESCAPE:
-                self.state = "menu"
+            elif key == pygame.K_ESCAPE:
+                self.to_menu()
+
+    def handle_tap(self, pos):
+        for rect, action in self.buttons:
+            if rect.collidepoint(pos):
+                action()
+                return
+        x, y = pos
+        if self.state == "menu":
+            i = round((y - MENU_Y) / MENU_STEP)
+            if 0 <= i < len(MENU) and abs(y - (MENU_Y + i * MENU_STEP)) <= MENU_STEP / 2:
+                self.menu_index = i
+                if MENU[i] in ("stage", "threshold") and abs(x - W / 2) > 170:
+                    self.menu_step(1 if x > W / 2 else -1)  # the "<" and ">" ends
+                elif MENU[i] != "threshold":
+                    self.menu_select()
+        elif self.state == "play" and self.mic.backend is None:
+            self.on_clap(self.now_ms())  # no microphone: tapping is the clap
+
+    def menu_step(self, step):
+        if MENU[self.menu_index] == "threshold":
+            det = self.mic.detector
+            det.ratio = round(min(THRESHOLD_MAX, max(THRESHOLD_MIN, det.ratio + 0.1 * step)), 1)
+        else:
+            self.stage_index = (self.stage_index + step) % len(STAGES)
+
+    def to_menu(self):
+        self.stop_music()
+        self.state = "menu"
+
+    def results_continue(self):
+        if self.cleared:
+            self.stage_index = (self.stage_index + 1) % len(STAGES)
+        self.start_session()
+
+    def save_calibration(self):
+        result = self.cal["result"]
+        if "threshold" in result:
+            self.mic.detector.ratio = result["threshold"]
+            self.offset_ms = result["offset"]
+            self.save_settings()
+        self.state = "menu"
 
     def menu_select(self):
         item = MENU[self.menu_index]
@@ -467,7 +504,7 @@ class Game:
     def draw_mic_meter(self, x, y, w=240, h=14, centered=False):
         det = self.mic.detector
         if self.mic.backend is None:
-            surf = self.ui_text(20, self.tr("no_mic"), DIM)
+            surf = self.ui_text(20, self.tr("no_mic_touch" if ON_ANDROID else "no_mic"), DIM)
             anchor = {"midtop": (x + w // 2, y)} if centered else {"topright": (x + w, y)}
             self.screen.blit(surf, surf.get_rect(**anchor))
             return
@@ -513,7 +550,7 @@ class Game:
         for i, label in enumerate(items):
             sel = i == self.menu_index
             surf = self.ui_text(28, label, GOLD if sel else TEXT)
-            cy = 200 + i * 40
+            cy = MENU_Y + i * MENU_STEP
             self.blit_center(surf, W / 2, cy)
             if sel:
                 r = surf.get_rect(center=(W // 2, cy))
@@ -522,7 +559,8 @@ class Game:
         self.draw_mic_meter(W // 2 - 120, 600, centered=True)
         test = "clap_detected" if time.perf_counter() - self.last_clap_wall < 0.6 else "clap_test"
         self.blit_center(self.ui_text(20, self.tr(test), DIM), W / 2, 575)
-        self.blit_center(self.ui_text(18, self.tr("menu_hint"), DIM), W / 2, H - 24)
+        self.blit_center(self.ui_text(18, self.tr("menu_hint_touch" if ON_ANDROID else "menu_hint"),
+                                      DIM), W / 2, H - 24)
 
     def draw_calibrate(self):
         self.blit_center(self.ui_text(56, self.tr("cal_title"), CYAN), W / 2, 80)
@@ -541,7 +579,7 @@ class Game:
                 color = GOLD if k in self.cal["hits"] else (RAIL if now < k * core.BEAT_MS else RED)
                 pygame.draw.circle(self.screen, color, (int(x), 450), 14)
             self.draw_mic_meter(W // 2 - 120, 540, centered=True)
-            self.blit_center(self.ui_text(18, self.tr("cal_hint_run"), DIM), W / 2, H - 24)
+            self.draw_buttons([("btn_cancel", self.to_menu)], "cal_hint_run")
             return
         lines = [(self.tr("cal_heard", n=result["heard"], total=CAL_CLAPS), TEXT)]
         if "threshold" in result:
@@ -555,8 +593,13 @@ class Game:
         for i, (text, color) in enumerate(lines):
             self.blit_center(self.ui_text(26 if color is not RED else 20, text, color),
                              W / 2, 190 + i * 56)
-        hint = "cal_hint" if "threshold" in result else "cal_hint_fail"
-        self.blit_center(self.ui_text(22, self.tr(hint), DIM), W / 2, H - 50)
+        if "threshold" in result:
+            self.draw_buttons([("btn_save", self.save_calibration),
+                               ("btn_try_again", self.start_calibration),
+                               ("btn_cancel", self.to_menu)], "cal_hint")
+        else:
+            self.draw_buttons([("btn_try_again", self.start_calibration),
+                               ("btn_back", self.to_menu)], "cal_hint_fail")
 
     def draw_rail(self, now):
         # timing windows around the hit line
@@ -649,7 +692,10 @@ class Game:
         if self.mic.backend:
             off = self.ui_text(16, self.tr("offset", ms=self.offset_ms), DIM)
             self.screen.blit(off, (W - 280, 70))
-        self.blit_center(self.ui_text(18, self.tr("play_hint"), DIM), W / 2, H - 24)
+        if ON_ANDROID:
+            self.draw_button("btn_menu", self.to_menu, pygame.Rect(W - 170, H - 70, 150, 50), size=20)
+        else:
+            self.blit_center(self.ui_text(18, self.tr("play_hint"), DIM), W / 2, H - 24)
 
     def draw_flashes(self, now):
         for f in self.flashes[-3:]:
@@ -676,10 +722,15 @@ class Game:
         accuracy = (sc.counts[core.PERFECT] + 0.5 * sc.counts[core.GOOD]) / total * 100
         if not self.cleared:
             title, color, hint = "try_again", RED, "hint_retry"
+            buttons = [("btn_retry", self.start_session), ("btn_menu", self.to_menu)]
         elif self.stage_index == len(STAGES) - 1:
             title, color, hint = "all_clear", GOLD, "hint_done"
+            buttons = [("btn_stage1", self.results_continue), ("btn_retry", self.start_session),
+                       ("btn_menu", self.to_menu)]
         else:
             title, color, hint = "stage_clear", GREEN, "hint_next"
+            buttons = [("btn_next", self.results_continue), ("btn_retry", self.start_session),
+                       ("btn_menu", self.to_menu)]
         self.blit_center(self.ui_text(64, self.tr(title), color), W / 2, 90)
         self.blit_center(self.ui_text(24, self.stage_label(), DIM), W / 2, 145)
         need = math.ceil(len(self.session.targets) * CLEAR_RATIO)
@@ -699,4 +750,21 @@ class Game:
             self.screen.blit(l, l.get_rect(midright=(W // 2 - 30, y)))
             v = self.en_font(40).render(value, True, color)
             self.screen.blit(v, v.get_rect(midleft=(W // 2 + 30, y)))
-        self.blit_center(self.ui_text(22, self.tr(hint), DIM), W / 2, H - 50)
+        self.draw_buttons(buttons, hint)
+
+    def draw_button(self, label_key, action, rect, size=24):
+        pygame.draw.rect(self.screen, (40, 46, 70), rect, border_radius=12)
+        pygame.draw.rect(self.screen, CYAN, rect, 2, border_radius=12)
+        self.blit_center(self.ui_text(size, self.tr(label_key), TEXT), *rect.center)
+        self.buttons.append((rect, action))
+
+    def draw_buttons(self, specs, hint_key):
+        """A centred row of tappable buttons; on desktop the keyboard hint goes underneath."""
+        gap = 24
+        x = (W - len(specs) * BUTTON_W - (len(specs) - 1) * gap) // 2
+        y = H - 130 if not ON_ANDROID else H - 100
+        for label_key, action in specs:
+            self.draw_button(label_key, action, pygame.Rect(x, y, BUTTON_W, BUTTON_H))
+            x += BUTTON_W + gap
+        if not ON_ANDROID:
+            self.blit_center(self.ui_text(18, self.tr(hint_key), DIM), W / 2, H - 30)

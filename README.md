@@ -67,6 +67,25 @@ The exe is a single 33 MB file with Python and all libraries bundled. It uses th
 bundled Kokoro voice and Japanese fonts that come with Windows (Yu
 Gothic, Meiryo, MS Gothic).
 
+## Android .apk
+
+```bash
+./packaging/build-apk.sh        # -> dist/beatclap-0.3.0-arm64-v8a-debug.apk
+```
+
+This builds with buildozer / python-for-android, using the Android SDK/NDK in
+`~/.buildozer` and a buildozer venv in `~/.venvs/beatclap-android`. Everything
+else lives under `build/android`. The first build compiles Python, numpy, pygame
+and SDL2 for ARM and takes a long time; later builds are quicker. The app targets
+Android 10+ on 64-bit ARM (`arm64-v8a`), and asks for the microphone on first
+launch.
+
+On Android the mic is read with `AudioRecord`, preferring the `UNPROCESSED`
+source so the system's noise suppression doesn't flatten claps. Everything is
+playable by touch: tap menu items (tap the `<` / `>` ends to change a value),
+use the on-screen buttons, and the Back button goes back. The launcher icon is
+drawn in code (`packaging/android/make_icon.py`).
+
 ## How it works
 
 | Piece | Where | Details |
@@ -84,6 +103,7 @@ Gothic, Meiryo, MS Gothic).
 ## Controls
 
 Menu: `UP`/`DOWN` select, `LEFT`/`RIGHT` change the stage or clap threshold, `ENTER` confirm.
+The mouse or touch works everywhere too: click menu items and the on-screen buttons.
 In play: `SPACE` clap (keyboard) · `[` / `]` mic latency offset ±5 ms · `M` metronome
 click · `L` language · `ESC` menu
 

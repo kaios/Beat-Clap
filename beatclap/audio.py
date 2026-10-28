@@ -1,10 +1,12 @@
-"""Microphone capture (sounddevice, falling back to pyaudio) and clap transient detection."""
+"""Microphone capture (Android AudioRecord, sounddevice, or pyaudio) and clap transient detection."""
 import collections
 import queue
 import threading
 import time
 
 import numpy as np
+
+from . import device
 
 SPIKE_RATIO = 2.5         # clap when rms > ambient floor * 2.5 (adjustable: "mic sensitivity")
 COOLDOWN_S = 0.150        # ignore re-triggers (echoes, reflections) for 150 ms
@@ -153,7 +155,9 @@ class MicListener:
 
     def start(self):
         errors = []
-        for starter in (self._start_sounddevice, self._start_pyaudio):
+        starters = (self._start_android,) if device.ON_ANDROID else (self._start_sounddevice,
+                                                                      self._start_pyaudio)
+        for starter in starters:
             try:
                 starter()
                 return True
@@ -186,6 +190,62 @@ class MicListener:
         self.history.append((peak_t, level))
         if self.detector.process(level, block_start, n / self.samplerate):
             self.claps.put(peak_t)
+
+    def _start_android(self):
+        """AudioRecord through pyjnius. Opening waits for the RECORD_AUDIO permission, so it
+        runs on the reader thread; `backend` is set once audio is actually flowing."""
+        from android.permissions import Permission, check_permission, request_permissions
+        from jnius import autoclass, detach
+
+        self.samplerate = 44100  # the one rate every Android device must support
+        if not check_permission(Permission.RECORD_AUDIO):
+            request_permissions([Permission.RECORD_AUDIO])
+
+        def reader():
+            try:
+                while self._running and not check_permission(Permission.RECORD_AUDIO):
+                    time.sleep(0.25)
+                if not self._running:
+                    return
+                AudioRecord = autoclass("android.media.AudioRecord")
+                AudioFormat = autoclass("android.media.AudioFormat")
+                Source = autoclass("android.media.MediaRecorder$AudioSource")
+                mono, pcm16 = AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+                size = max(AudioRecord.getMinBufferSize(self.samplerate, mono, pcm16),
+                           self.blocksize * 2 * 8)
+                rec = None
+                # UNPROCESSED / VOICE_RECOGNITION skip the gain control and noise suppression
+                # that the plain MIC source applies, which squash short sharp sounds like claps.
+                for source in (Source.UNPROCESSED, Source.VOICE_RECOGNITION, Source.MIC):
+                    try:
+                        r = AudioRecord(source, self.samplerate, mono, pcm16, size)
+                        if r.getState() == AudioRecord.STATE_INITIALIZED:
+                            rec = r
+                            break
+                        r.release()
+                    except Exception:
+                        pass
+                if rec is None:
+                    self.error = "could not open the microphone"
+                    return
+                rec.startRecording()
+                self.backend, self.device_name = "android", "Microphone"
+                latency = size / 2 / self.samplerate / 2  # rough; the mic check calibrates the rest
+                buf = bytearray(self.blocksize * 2)
+                while self._running:
+                    n = rec.read(buf, 0, len(buf))  # pyjnius copies the Java byte[] back into buf
+                    now = time.perf_counter()
+                    if n > 0:
+                        mono_block = np.frombuffer(bytes(buf[:n]), dtype="<i2").astype(np.float32) / 32768.0
+                        self._ingest(mono_block, now - latency - len(mono_block) / self.samplerate)
+                rec.stop()
+                rec.release()
+            finally:
+                detach()
+
+        self._running = True
+        self._thread = threading.Thread(target=reader, name="mic-reader", daemon=True)
+        self._thread.start()
 
     def _start_sounddevice(self):
         import sounddevice as sd

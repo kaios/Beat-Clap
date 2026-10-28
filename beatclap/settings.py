@@ -14,6 +14,8 @@ DEFAULTS = {
 
 
 def path():
+    if os.environ.get("ANDROID_PRIVATE"):  # the app's private storage on Android
+        return os.path.join(os.environ["ANDROID_PRIVATE"], "settings.json")
     if sys.platform == "win32":
         return os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
                             "BeatClap", "settings.json")
