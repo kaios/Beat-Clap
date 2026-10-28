@@ -6,18 +6,26 @@ import time
 
 import numpy as np
 
-SPIKE_RATIO = 2.5         # clap when rms > ambient floor * 2.5
+SPIKE_RATIO = 2.5         # clap when rms > ambient floor * 2.5 (adjustable: "mic sensitivity")
 COOLDOWN_S = 0.150        # ignore re-triggers (echoes, reflections) for 150 ms
-MIN_FLOOR = 0.002         # keeps the floor from collapsing to 0 on digitally silent inputs
+MIN_FLOOR = 0.0015        # keeps the floor from collapsing to 0 on digitally silent inputs
 FLOOR_TAU_S = 0.75        # time constant of the ambient floor tracker
 WARMUP_S = 0.25           # initial ambient measurement before detection is armed
-VOICE_GUARD_RATIO = 1.5   # while the game is speaking, claps must beat its own voice by this much
+VOICE_GUARD_RATIO = 1.2   # while the game is speaking, claps must beat its own voice by this much
 SUSTAIN_S = 0.3           # a level held above threshold this long is new ambience, not a clap
 
 
 def rms(block):
     block = np.asarray(block, dtype=np.float32)
     return float(np.sqrt(np.mean(block * block))) if block.size else 0.0
+
+
+def hf_rms(block, prev=0.0):
+    """RMS of the first difference: a gentle high-pass (+6 dB/octave). A clap's energy is
+    broadband and reaches high up, while speech and music sit mostly low, so this is the
+    level the detector works on. `prev` is the last sample of the previous block."""
+    block = np.asarray(block, dtype=np.float32)
+    return rms(np.diff(block, prepend=np.float32(prev))) if block.size else 0.0
 
 
 class ClapDetector:
@@ -132,6 +140,9 @@ class MicListener:
         self.detector = ClapDetector()
         self.claps = queue.SimpleQueue()
         self.buffer = collections.deque(maxlen=max(1, int(buffer_s * samplerate / blocksize)))
+        # (peak time, level) per block over the last ~12 s, for the mic check screen
+        self.history = collections.deque(maxlen=int(12 * samplerate / blocksize))
+        self._prev_sample = 0.0
         self.backend = None
         self.device_name = ""
         self.error = None
@@ -168,10 +179,13 @@ class MicListener:
         """Common path for both backends. mono: float32 in [-1, 1]; block_start: perf_counter of sample 0."""
         self.buffer.append(mono.copy())
         n = len(mono)
-        if self.detector.process(rms(mono), block_start, n / self.samplerate):
-            # Refine the onset to the loudest sample inside the block.
-            peak = int(np.argmax(np.abs(mono)))
-            self.claps.put(block_start + peak / self.samplerate)
+        level = hf_rms(mono, self._prev_sample)
+        self._prev_sample = float(mono[-1]) if n else self._prev_sample
+        # Refine timing to the loudest sample inside the block.
+        peak_t = block_start + int(np.argmax(np.abs(mono))) / self.samplerate if n else block_start
+        self.history.append((peak_t, level))
+        if self.detector.process(level, block_start, n / self.samplerate):
+            self.claps.put(peak_t)
 
     def _start_sounddevice(self):
         import sounddevice as sd

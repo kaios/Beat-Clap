@@ -30,10 +30,17 @@ python -m beatclap --list-devices
 If neither `sounddevice` nor `pyaudio` can open a mic, the game falls back to
 **SPACE** as the clap key.
 
-The voice uses whatever speech engine the system has, synthesized in memory at
-runtime: `espeak-ng` / `espeak` on Linux (`sudo apt install espeak-ng`), `say`
-on macOS, or `pip install pyttsx3` on Windows. If none is found, the game runs
-silently.
+The voice is a natural neural voice (Kokoro, voice `af_heart`), pre-rendered once
+and bundled as `beatclap/voice_clips.npz` (4.6 MB): every word, every syllable,
+and the mic-check count. To regenerate it after changing the word list, see
+`tools/generate_voice.py`. Any word missing from the bundle falls back to the
+system's speech engine (`espeak-ng`, macOS `say`, or Windows SAPI).
+
+**First run: do a Mic check** (in the menu). You clap along to 8 beats with the
+music playing. The game measures how loud your claps are compared to the room
+and to its own voice, and how late your mic delivers sound. It then sets the
+clap threshold and timing offset for you. Settings are saved to
+`~/.config/beat-clap/settings.json` (`%APPDATA%\BeatClap` on Windows).
 
 ## Debian package
 
@@ -57,17 +64,17 @@ The first run sets up a separate Wine prefix in `build/wine` with Windows Python
 On Windows itself, install the same packages and run `py packaging\build_exe.py`.
 
 The exe is a single 33 MB file with Python and all libraries bundled. It uses the
-Windows voice (SAPI) for speech and Japanese fonts that come with Windows (Yu
+bundled Kokoro voice and Japanese fonts that come with Windows (Yu
 Gothic, Meiryo, MS Gothic).
 
 ## How it works
 
 | Piece | Where | Details |
 |---|---|---|
-| Audio capture | `beatclap/audio.py` `MicListener` | 256-sample blocks at 48 kHz (~5 ms) go into a 1 s ring buffer. RMS is computed per block. Timestamps come from the ADC clock, mapped to `perf_counter`. |
-| Clap detector | `ClapDetector` | Fires when `rms > ambient_floor * 2.5`, then blocks for **150 ms**. The level must also fall back below threshold before the next clap, so one sustained noise counts once. The floor adapts only on quiet blocks. |
+| Audio capture | `beatclap/audio.py` `MicListener` | 256-sample blocks at 48 kHz (~5 ms) go into a 1 s ring buffer. RMS is computed per block on the first difference of the signal, a gentle high-pass: claps are broadband, while speech and music sit mostly low, so on this level an equally loud clap reads about 4.7× louder than a spoken syllable. Timestamps come from the ADC clock, mapped to `perf_counter`. |
+| Clap detector | `ClapDetector` | Fires when `rms > ambient_floor * 2.5` (adjustable as "Clap threshold", 1.3–3.0, set by the mic check), then blocks for **150 ms**. The level must also fall back below threshold before the next clap, so one sustained noise counts once. The floor adapts only on quiet blocks. |
 | Voice | `beatclap/voice.py`, `words.SPOKEN` | The word is spoken on beat 1 of its read bar. Each syllable is spoken so its vowel onset (where the loudness first reaches half its peak) lands on the node. Syllables use respellings (`U-NI-VER-SI-TY` is spoken as `you-nih-ver-sih-tee`) so TTS doesn't read letter names. |
-| Self-trigger guard | `ClapDetector.measure_voice` / `guard_voice` | While the word preview plays, the detector records how loud the game's voice is at the mic (no claps register then). While a syllable plays, a clap must be 1.5× louder than that, so speaker output can't score points by itself. |
+| Self-trigger guard | `ClapDetector.measure_voice` / `guard_voice` | While the word preview plays, the detector records how loud the game's voice is at the mic (no claps register then). While a syllable plays, a clap must be 1.2× louder than that, so speaker output can't score points by itself. |
 | Music | `beatclap/music.py`, `beatclap/stages.py` | Each song is an 8-bar loop at exactly 100 BPM, synthesized with numpy when the stage starts. Sample 0 is beat 0, so the music stays locked to the rail. It plays on its own mixer channel and peaks at about a third of the voice's level. |
 | Music vs. the mic | `music.tame_transients`, `ClapDetector.rewarm` | Hits whose 5 ms RMS rises more than 1.6× above the loop's running average get softened, so drums can never reach the detector's 2.5× threshold. When a stage starts, the detector re-learns the background level with the music playing. If the room stays louder for 0.3 s or more (a fan, for example), the floor follows it instead of getting stuck. |
 | Chart | `beatclap/core.py` `build_chart` | Each word gets one read bar, then one syllable per beat starting on the next downbeat, padded to whole bars. |
@@ -76,14 +83,20 @@ Gothic, Meiryo, MS Gothic).
 
 ## Controls
 
-Menu: `UP`/`DOWN` select, `LEFT`/`RIGHT` choose stage, `ENTER` confirm.
+Menu: `UP`/`DOWN` select, `LEFT`/`RIGHT` change the stage or clap threshold, `ENTER` confirm.
 In play: `SPACE` clap (keyboard) · `[` / `]` mic latency offset ±5 ms · `M` metronome
 click · `L` language · `ESC` menu
 
 **Tip:** Headphones work best, since the mic then hears only your claps. On
 speakers, keep the volume moderate so your claps are clearly louder than the
-voice and music. The metronome click is off by default for the same reason. If your judgements
-are consistently "late", lower the mic offset with `[`.
+voice and music. Run the Mic check to see if they are. The metronome click
+is off by default for the same reason. If your judgements are consistently
+"late", the mic check fixes the offset, or adjust it in play with `[` / `]`.
+
+## Credits
+
+The voice was generated with [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)
+(Apache-2.0) via [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx).
 
 ## Tests
 

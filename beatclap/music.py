@@ -230,12 +230,17 @@ def render(song, sr, seed=7):
 
 
 def tame_transients(x, sr, limit=CREST_LIMIT, block_s=0.005, tau_s=0.75):
-    """Duck any 5 ms block whose RMS exceeds `limit` x the slow running RMS of the loop."""
+    """Duck any 5 ms block whose RMS exceeds `limit` x the slow running RMS of the loop.
+
+    Levels are measured on the first difference, the same high-passed signal the clap
+    detector listens to (audio.hf_rms), so hi-hats count as much as the detector hears them.
+    """
     block = max(1, int(sr * block_s))
     n = len(x)
     nb = -(-n // block)
-    for _ in range(4):  # ducking lowers the slow average a little, so iterate to a fixed point
-        padded = np.concatenate([x, x[: nb * block - n]])
+    for _ in range(6):  # ducking lowers the slow average a little, so iterate to a fixed point
+        hp = np.diff(x, prepend=x[-1])  # loop wraps, so the first sample follows the last
+        padded = np.concatenate([hp, hp[: nb * block - n]])
         fast = np.sqrt(np.mean(padded.reshape(nb, block) ** 2, axis=1)) + 1e-9
         alpha = min(1.0, block_s / tau_s)
         slow = np.empty(nb)

@@ -6,11 +6,10 @@ import time
 import numpy as np
 import pygame
 
-from . import core, i18n, music
-from .audio import MicListener
+from . import core, i18n, music, settings
+from .audio import MIN_FLOOR, MicListener
 from .stages import CLEAR_RATIO, STAGES
 from .voice import Voice
-from .words import spoken_syllables
 
 W, H = 1280, 720
 HIT_X = 260
@@ -21,9 +20,14 @@ FLASH_MS = 550
 AUDIO_GRACE_MS = 60
 OUTPUT_LATENCY_MS = 20      # mixer output latency: sounds start this early to be heard on time
 VOICE_GUARD_MARGIN_MS = 80  # extra time either side of a clip for speaker-to-mic delay
-MUSIC_VOLUME = 0.5          # music peaks at 0.25 after this, well under the voice's 0.8
+MUSIC_VOLUME = 0.35         # music peaks at ~0.18 after this, well under the voice's 0.8
 MUSIC_REWARM_S = 1.0        # let the clap detector re-learn the room once music starts
-MENU = ("start", "stage", "language", "voice", "music", "metronome", "quit")
+MENU = ("start", "stage", "mic_check", "threshold", "language", "voice", "music", "metronome",
+        "quit")
+THRESHOLD_MIN, THRESHOLD_MAX = 1.3, 3.0
+# Mic check timeline, in beats: 2 lead-in, a spoken 4 count, then 8 claps.
+CAL_COUNT_FROM, CAL_CLAP_FROM, CAL_CLAPS = 2, 6, 8
+CAL_WINDOW_MS = 250
 
 BG = (14, 17, 30)
 RAIL = (60, 68, 98)
@@ -100,23 +104,25 @@ class Flash:
 
 
 class Game:
-    def __init__(self, device=None, lang="en", num_words=8):
+    def __init__(self, device=None, lang=None, num_words=8):
         pygame.mixer.pre_init(44100, -16, 2, 256)
         pygame.init()
         pygame.display.set_caption("Beat Clap")
         self.screen = pygame.display.set_mode((W, H))
         self.clock = pygame.time.Clock()
         self.fonts = Fonts()
-        self.lang = lang
+        saved = settings.load()
+        self.lang = lang or saved["lang"]
         self.num_words = num_words
         self.state = "menu"
         self.menu_index = 0
-        self.metronome = False
-        self.voice_on = True
-        self.music_on = True
+        self.metronome = saved["metronome"]
+        self.voice_on = saved["voice_on"]
+        self.music_on = saved["music_on"]
         self.stage_index = 0
         self.cleared = False
-        self.offset_ms = 0
+        self.offset_ms = saved["offset_ms"]
+        self.cal = None
         self.last_clap_wall = -10.0
         self.session = None
 
@@ -131,7 +137,13 @@ class Game:
         self.voice = Voice()
 
         self.mic = MicListener(device=device)
+        self.mic.detector.ratio = saved["threshold"]
         self.mic.start()
+
+    def save_settings(self):
+        settings.save({"lang": self.lang, "voice_on": self.voice_on, "music_on": self.music_on,
+                       "metronome": self.metronome, "offset_ms": self.offset_ms,
+                       "threshold": round(self.mic.detector.ratio, 1)})
 
     # ---------- helpers ----------
 
@@ -174,6 +186,7 @@ class Game:
                 pygame.display.flip()
                 self.clock.tick(144)
         finally:
+            self.save_settings()
             self.mic.stop()
             pygame.quit()
 
@@ -195,7 +208,11 @@ class Game:
                 self.menu_select()
             elif event.key in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_a, pygame.K_d):
                 step = 1 if event.key in (pygame.K_RIGHT, pygame.K_d) else -1
-                self.stage_index = (self.stage_index + step) % len(STAGES)
+                if MENU[self.menu_index] == "threshold":
+                    det = self.mic.detector
+                    det.ratio = round(min(THRESHOLD_MAX, max(THRESHOLD_MIN, det.ratio + 0.1 * step)), 1)
+                else:
+                    self.stage_index = (self.stage_index + step) % len(STAGES)
             elif event.key == pygame.K_SPACE:
                 self.last_clap_wall = time.perf_counter()
             elif event.key == pygame.K_ESCAPE:
@@ -212,6 +229,19 @@ class Game:
                 self.offset_ms -= 5
             elif event.key == pygame.K_RIGHTBRACKET:
                 self.offset_ms += 5
+        elif self.state == "calibrate":
+            if event.key == pygame.K_ESCAPE:
+                self.stop_music()
+                self.state = "menu"
+            elif event.key == pygame.K_r:
+                self.start_calibration()
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and self.cal.get("result"):
+                result = self.cal["result"]
+                if "threshold" in result:
+                    self.mic.detector.ratio = result["threshold"]
+                    self.offset_ms = result["offset"]
+                    self.save_settings()
+                self.state = "menu"
         elif self.state == "results":
             if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 if self.cleared:
@@ -228,6 +258,11 @@ class Game:
             self.start_session()
         elif item == "stage":
             self.stage_index = (self.stage_index + 1) % len(STAGES)
+        elif item == "mic_check":
+            if self.mic.backend:
+                self.start_calibration()
+        elif item == "threshold":
+            self.mic.detector.ratio = settings.DEFAULTS["threshold"]
         elif item == "language":
             self.lang = "ja" if self.lang == "en" else "en"
         elif item == "voice":
@@ -290,11 +325,11 @@ class Game:
         syllable is spoken so its vowel onset lands exactly on its node."""
         cues = []
         for seg in self.session.segments:
-            word = self.voice.clip(seg.word.replace("-", "").lower(), syllable=False)
+            word = self.voice.word_clip(seg.word)
             if word:
                 cues.append((seg.start_ms - word.onset_ms - OUTPUT_LATENCY_MS, word, True))
-            for tgt, text in zip(seg.targets, spoken_syllables(seg.word)):
-                clip = self.voice.clip(text)
+            for tgt in seg.targets:
+                clip = self.voice.syllable_clip(seg.word, tgt.syl_index)
                 if clip:
                     cues.append((tgt.time_ms - clip.onset_ms - OUTPUT_LATENCY_MS, clip, False))
         cues.sort(key=lambda c: c[0])
@@ -313,6 +348,78 @@ class Game:
                 self.mic.detector.measure_voice(start, end)
             else:
                 self.mic.detector.guard_voice(start, end)
+
+    # ---------- mic check ----------
+
+    def start_calibration(self):
+        """Clap along to 8 beats over the stage 1 music, after a spoken 4 count. Measures
+        how loud claps arrive versus the room and the game's own voice, and the timing offset."""
+        self.cues = []
+        if self.voice_on and self.voice.available:
+            for n in range(1, 5):
+                clip = self.voice.count_clip(n)
+                if clip:  # "preview" cues: the detector measures the voice, doesn't trigger
+                    beat_ms = (CAL_COUNT_FROM + n - 1) * core.BEAT_MS
+                    self.cues.append((beat_ms - clip.onset_ms - OUTPUT_LATENCY_MS, clip, True))
+        self.cue_index = 0
+        self.cal = {"hits": set(), "result": None}
+        self.beat_pulse_at = -1e9
+        self.last_beat = -1
+        self.drain_mic()
+        song = None
+        if self.music_on and self.music_channel:
+            saved, self.stage_index = self.stage_index, 0
+            song = self.stage_music()
+            self.stage_index = saved
+        if song:
+            self.music_channel.play(song, loops=-1)
+            self.mic.detector.rewarm(MUSIC_REWARM_S)
+        self.t0 = time.perf_counter() + OUTPUT_LATENCY_MS / 1000.0
+        self.state = "calibrate"
+
+    def update_calibrate(self):
+        if self.cal["result"]:
+            self.drain_mic()
+            return
+        now = self.now_ms()
+        self.play_due_cues(now)
+        for clap_wall in self.drain_mic():
+            self.last_clap_wall = time.perf_counter()
+            beat = round((clap_wall - self.t0) * 1000.0 / core.BEAT_MS)
+            if CAL_CLAP_FROM <= beat < CAL_CLAP_FROM + CAL_CLAPS:
+                self.cal["hits"].add(beat)
+        beat = int(now // core.BEAT_MS)
+        if beat > self.last_beat:
+            self.last_beat = beat
+            self.beat_pulse_at = beat * core.BEAT_MS
+        if now > (CAL_CLAP_FROM + CAL_CLAPS) * core.BEAT_MS + CAL_WINDOW_MS + 100:
+            self.cal["result"] = self.measure_calibration()
+            self.stop_music(800)
+
+    def measure_calibration(self):
+        det = self.mic.detector
+        floor = max(det.floor, MIN_FLOOR)
+        points = [((t - self.t0) * 1000.0, level) for t, level in list(self.mic.history)]
+        found = []
+        for k in range(CAL_CLAP_FROM, CAL_CLAP_FROM + CAL_CLAPS):
+            beat_ms = k * core.BEAT_MS
+            window = [p for p in points if abs(p[0] - beat_ms) <= CAL_WINDOW_MS]
+            if window:
+                ms, level = max(window, key=lambda p: p[1])
+                if level > 2 * floor:
+                    found.append((ms - beat_ms, level))
+        result = {"heard": len(found)}
+        if len(found) >= CAL_CLAPS // 2:
+            clap = float(np.median([level for _, level in found]))
+            room = clap / floor
+            result.update(
+                room=room,
+                offset=int(round(float(np.median([dt for dt, _ in found])) / 5) * 5),
+                # put a typical clap at about twice the threshold, never stricter than the default
+                threshold=round(min(settings.DEFAULTS["threshold"], max(THRESHOLD_MIN, room / 2)), 1),
+                voice_loud=det.voice_threshold > 0.8 * clap,
+            )
+        return result
 
     def on_clap(self, clap_ms):
         self.last_clap_wall = time.perf_counter()
@@ -378,8 +485,7 @@ class Game:
         fx = x + to_px(det.floor)
         pygame.draw.line(self.screen, DIM, (fx, y), (fx, y + h), 1)
         name = self.mic.device_name[:28]
-        label = self.ui_text(16, self.tr("mic", name=name, backend=self.mic.backend),
-                                        True, DIM)
+        label = self.ui_text(16, self.tr("mic", name=name, backend=self.mic.backend), DIM)
         self.screen.blit(label, (x, y + h + 6))
         age = time.perf_counter() - self.last_clap_wall
         if age < 0.3:
@@ -387,14 +493,16 @@ class Game:
             pygame.draw.circle(self.screen, GOLD, (x - 22, y + h // 2), r, 2)
 
     def draw_menu(self):
-        self.blit_center(self.ui_text(84, self.tr("title"), CYAN), W / 2, 105)
-        self.blit_center(self.ui_text(26, self.tr("subtitle"), DIM), W / 2, 172)
+        self.blit_center(self.ui_text(76, self.tr("title"), CYAN), W / 2, 80)
+        self.blit_center(self.ui_text(24, self.tr("subtitle"), DIM), W / 2, 140)
         if self.lang == "ja" and not self.fonts.ja_path:
-            self.blit_center(self.en_font(20).render(self.tr("no_ja_font"), True, RED), W / 2, 205)
+            self.blit_center(self.en_font(20).render(self.tr("no_ja_font"), True, RED), W / 2, 168)
 
         items = [
             self.tr("start"),
             f"<  {self.stage_label()}  >",
+            self.tr("mic_check") if self.mic.backend else self.tr("mic_check_none"),
+            f"<  {self.tr('threshold', x=self.mic.detector.ratio)}  >",
             self.tr("language"),
             self.tr("voice", state=self.tr("on" if self.voice_on else "off"))
             if self.voice.available else self.tr("no_voice"),
@@ -404,8 +512,8 @@ class Game:
         ]
         for i, label in enumerate(items):
             sel = i == self.menu_index
-            surf = self.ui_text(32, label, GOLD if sel else TEXT)
-            cy = 250 + i * 46
+            surf = self.ui_text(28, label, GOLD if sel else TEXT)
+            cy = 200 + i * 40
             self.blit_center(surf, W / 2, cy)
             if sel:
                 r = surf.get_rect(center=(W // 2, cy))
@@ -415,6 +523,40 @@ class Game:
         test = "clap_detected" if time.perf_counter() - self.last_clap_wall < 0.6 else "clap_test"
         self.blit_center(self.ui_text(20, self.tr(test), DIM), W / 2, 575)
         self.blit_center(self.ui_text(18, self.tr("menu_hint"), DIM), W / 2, H - 24)
+
+    def draw_calibrate(self):
+        self.blit_center(self.ui_text(56, self.tr("cal_title"), CYAN), W / 2, 80)
+        result = self.cal["result"]
+        if result is None:
+            now = self.now_ms()
+            counting = now < CAL_CLAP_FROM * core.BEAT_MS - core.BEAT_MS / 2
+            self.blit_center(self.ui_text(30, self.tr("cal_listen" if counting else "cal_clap"), TEXT),
+                             W / 2, 160)
+            pulse = max(0.0, 1 - (now - self.beat_pulse_at) / 250)
+            pygame.draw.circle(self.screen, GOLD if not counting else CYAN, (W // 2, 320),
+                               int(60 + 30 * pulse), 0 if pulse > 0.5 else 4)
+            for i in range(CAL_CLAPS):
+                k = CAL_CLAP_FROM + i
+                x = W // 2 + (i - (CAL_CLAPS - 1) / 2) * 50
+                color = GOLD if k in self.cal["hits"] else (RAIL if now < k * core.BEAT_MS else RED)
+                pygame.draw.circle(self.screen, color, (int(x), 450), 14)
+            self.draw_mic_meter(W // 2 - 120, 540, centered=True)
+            self.blit_center(self.ui_text(18, self.tr("cal_hint_run"), DIM), W / 2, H - 24)
+            return
+        lines = [(self.tr("cal_heard", n=result["heard"], total=CAL_CLAPS), TEXT)]
+        if "threshold" in result:
+            lines += [(self.tr("cal_ratio", x=result["room"]), TEXT),
+                      (self.tr("cal_offset", ms=result["offset"]), TEXT),
+                      (self.tr("cal_threshold", x=result["threshold"]), GOLD)]
+            if result["voice_loud"]:
+                lines.append((self.tr("cal_voice_loud"), RED))
+        else:
+            lines.append((self.tr("cal_too_few"), RED))
+        for i, (text, color) in enumerate(lines):
+            self.blit_center(self.ui_text(26 if color is not RED else 20, text, color),
+                             W / 2, 190 + i * 56)
+        hint = "cal_hint" if "threshold" in result else "cal_hint_fail"
+        self.blit_center(self.ui_text(22, self.tr(hint), DIM), W / 2, H - 50)
 
     def draw_rail(self, now):
         # timing windows around the hit line

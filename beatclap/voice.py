@@ -1,8 +1,10 @@
-"""Text-to-speech for word and syllable prompts, synthesized in memory from a system engine.
+"""Voice prompts: words, syllables and the mic-check count.
 
-Tries espeak-ng / espeak (Linux), `say` (macOS), then pyttsx3 (Windows SAPI and others).
-Clips are trimmed and annotated with their vowel onset so the audible "beat" of each
-syllable can be placed exactly on its timeline node.
+The voice is pre-rendered with Kokoro, a neural TTS model, and bundled as voice_clips.npz
+(see tools/generate_voice.py). Anything missing from the bundle falls back to a system
+engine synthesized in memory: espeak-ng / espeak (Linux), `say` (macOS), then pyttsx3
+(Windows SAPI and others). Clips are trimmed and annotated with their vowel onset so the
+audible "beat" of each syllable can be placed exactly on its timeline node.
 """
 import io
 import os
@@ -14,6 +16,10 @@ import wave
 
 import numpy as np
 
+from .words import spoken_syllables
+
+BUNDLE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice_clips.npz")
+COUNT_WORDS = ["one", "two", "three", "four"]
 MAX_SYLLABLE_MS = 520     # stay shorter than one 600 ms beat so syllables never overlap
 FADE_MS = 30
 
@@ -107,30 +113,59 @@ class Clip:
 
 
 class Voice:
-    def __init__(self):
+    def __init__(self, bundle=BUNDLE):
         import pygame
         self._pygame = pygame
-        self.engine, self._synth = find_engine() if pygame.mixer.get_init() else (None, None)
         self._cache = {}
+        self._bank, self._bank_sr = {}, 0
+        self._fallback = None  # (name, synth) once looked up
+        if pygame.mixer.get_init() and os.path.exists(bundle):
+            try:
+                with np.load(bundle) as d:
+                    self._bank_sr = int(d["sr"])
+                    self._bank = {k: d[k] for k in d.files if k[:2] in ("w:", "s:", "c:")}
+            except Exception:
+                self._bank = {}
+
+    @property
+    def engine(self):
+        return "Kokoro" if self._bank else self._fallback_engine()[0]
 
     @property
     def available(self):
-        return self._synth is not None
+        return bool(self._bank) or self._fallback_engine()[1] is not None
 
-    def clip(self, text, syllable=True):
-        """Synthesize (cached). Returns a Clip, or None if no engine or synthesis failed."""
-        key = (text, syllable)
+    def word_clip(self, word):
+        return self._clip(f"w:{word}", word.replace("-", "").lower(), syllable=False)
+
+    def syllable_clip(self, word, index):
+        return self._clip(f"s:{word}:{index}", spoken_syllables(word)[index], syllable=True)
+
+    def count_clip(self, n):
+        return self._clip(f"c:{n}", COUNT_WORDS[n - 1], syllable=True)
+
+    def _fallback_engine(self):
+        if self._fallback is None:
+            self._fallback = find_engine() if self._pygame.mixer.get_init() else (None, None)
+        return self._fallback
+
+    def _clip(self, key, text, syllable):
+        """Bundled clip for key, else synthesize text (cached). None if neither works."""
         if key not in self._cache:
-            self._cache[key] = self._make(text, syllable) if self.available else None
+            raw = None
+            if key in self._bank:
+                raw = (self._bank[key].astype(np.float32) / 32768.0, self._bank_sr)
+            elif self._fallback_engine()[1] is not None:
+                try:
+                    raw = self._fallback_engine()[1](text)
+                except Exception:
+                    raw = None
+            self._cache[key] = self._make(*raw, syllable) if raw else None
         return self._cache[key]
 
-    def _make(self, text, syllable):
-        try:
-            raw, sr = self._synth(text)
-        except Exception:
-            return None
+    def _make(self, samples, sr, syllable):
         rate, _, channels = self._pygame.mixer.get_init()
-        x, onset = prepare(raw, sr, rate, MAX_SYLLABLE_MS if syllable else None)
+        x, onset = prepare(samples, sr, rate, MAX_SYLLABLE_MS if syllable else None)
         if not len(x):
             return None
         pcm = (x * 32767).astype(np.int16)

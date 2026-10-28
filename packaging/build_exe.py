@@ -21,6 +21,7 @@ PyInstaller.__main__.run([
     "--noconfirm",
     "--clean",
     "--paths", ROOT,
+    "--add-data", os.pathsep.join([os.path.join(ROOT, "beatclap", "voice_clips.npz"), "beatclap"]),
     "--distpath", os.path.join(ROOT, "dist"),
     "--workpath", os.path.join(ROOT, "build", "pyinstaller"),
     "--specpath", os.path.join(ROOT, "build"),

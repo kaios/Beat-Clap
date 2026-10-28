@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from beatclap import core, music, voice
-from beatclap.audio import ClapDetector, rms
+from beatclap.audio import ClapDetector, hf_rms
 from beatclap.stages import STAGES
 from beatclap.words import WORDS, spoken_syllables
 
@@ -123,7 +123,7 @@ class DetectorTest(unittest.TestCase):
         self.assertFalse(any(fired))
         det.process(0.01, t + 0.6, BLOCK)
         self.assertEqual(list(det.voice_peaks), [0.2])
-        self.assertAlmostEqual(det.voice_threshold, 0.3)
+        self.assertAlmostEqual(det.voice_threshold, 0.24)
 
     def test_guard_rejects_own_voice_but_accepts_loud_clap(self):
         det = ClapDetector()
@@ -132,12 +132,12 @@ class DetectorTest(unittest.TestCase):
         det.process(0.2, t, BLOCK)
         det.process(0.01, t + 0.2, BLOCK)
         det.guard_voice(t + 1.0, t + 1.5)
-        self.assertFalse(det.process(0.25, t + 1.1, BLOCK))   # leaked speech
+        self.assertFalse(det.process(0.22, t + 1.1, BLOCK))   # leaked speech
         self.assertAlmostEqual(det.floor, 0.01)                # and floor untouched
         det.process(0.01, t + 1.2, BLOCK)
         self.assertTrue(det.process(0.4, t + 1.3, BLOCK))     # real clap over it
         det.process(0.01, t + 1.6, BLOCK)
-        self.assertTrue(det.process(0.25, t + 1.7, BLOCK))    # same level, no guard
+        self.assertTrue(det.process(0.22, t + 1.7, BLOCK))    # same level, no guard
 
     def test_clapped_over_preview_is_discarded(self):
         det = ClapDetector()
@@ -147,7 +147,7 @@ class DetectorTest(unittest.TestCase):
             det.measure_voice(start, start + 0.1)
             det.process(peak, start, BLOCK)
             det.process(0.01, start + 0.2, BLOCK)
-        self.assertAlmostEqual(det.voice_threshold, 0.3)
+        self.assertAlmostEqual(det.voice_threshold, 0.24)
 
     def test_recovers_when_room_gets_permanently_louder(self):
         det = ClapDetector()
@@ -165,6 +165,60 @@ class DetectorTest(unittest.TestCase):
         fired = [det.process(0.1, t + i * BLOCK, BLOCK) for i in range(100)]
         self.assertFalse(any(fired))
         self.assertAlmostEqual(det.floor, 0.1)
+
+
+class MicPipelineTest(unittest.TestCase):
+    """End to end through MicListener's ingest path: speakers playing music and the game's
+    voice into the mic, with claps no louder (full-band) than the voice itself."""
+
+    SR = 48000
+
+    def synth_clap(self, rng):
+        n = int(self.SR * 0.06)
+        noise = rng.normal(0, 1, n)
+        band = np.convolve(noise, np.ones(3) / 3, "same") - np.convolve(noise, np.ones(40) / 40, "same")
+        return band * np.exp(-np.arange(n) / self.SR / 0.008)
+
+    def test_claps_heard_over_music_and_voice_but_voice_alone_is_not(self):
+        from beatclap.audio import MicListener, rms as full_rms
+        sr, rng = self.SR, np.random.default_rng(3)
+        bank = np.load(voice.BUNDLE)
+        def clip(key):
+            x = bank[key].astype(np.float32) / 32768
+            return np.interp(np.linspace(0, len(x) - 1, len(x) * 2), np.arange(len(x)), x)  # 24k -> 48k
+        def peak(x):
+            return max(full_rms(x[i:i + 256]) for i in range(0, len(x) - 256, 256))
+
+        y = rng.normal(0, 0.002, sr * 6)                               # room
+        loop = music.render(STAGES[0].song, sr)
+        y += np.tile(loop, 2)[: len(y)] * 0.15                         # background music
+        word, syl1, syl2 = clip("w:RO-BOT"), clip("s:RO-BOT:0"), clip("s:RO-BOT:1")
+        gain = 0.3 / np.abs(syl1).max()
+        events = [(1.0, word), (3.0, syl1), (3.6, syl2)]
+        for t, x in events:
+            y[int(t * sr): int(t * sr) + len(x)] += x * gain
+        voice_peak = peak(syl1 * gain)
+        claps = [3.03, 4.2]                                            # on a syllable, and alone
+        for t in claps:
+            c = self.synth_clap(rng)
+            c *= voice_peak / peak(c)                                  # only as loud as the voice
+            y[int(t * sr): int(t * sr) + len(c)] += c
+
+        mic = MicListener()
+        mic.detector.rewarm(1.0)
+        mic.detector.measure_voice(1.0, 1.0 + len(word) / sr + 0.08)
+        heard = []
+        for i in range(0, len(y) - 256, 256):
+            t = i / sr
+            for start, x in events[1:]:
+                if abs(t - start) < 0.003:
+                    mic.detector.guard_voice(start, start + len(x) / sr + 0.08)
+            mic._ingest(y[i:i + 256].astype(np.float32), t)
+            while not mic.claps.empty():
+                heard.append(mic.claps.get())
+        self.assertEqual(len(heard), len(claps), heard)
+        for got, want in zip(heard, claps):
+            self.assertLess(abs(got - want), 0.01)
 
 
 class MusicTest(unittest.TestCase):
@@ -190,7 +244,8 @@ class MusicTest(unittest.TestCase):
             for level in (0.05, 1.0):
                 det = ClapDetector()
                 y = np.tile(x, 2) * level
-                fired = sum(det.process(rms(y[i:i + block]), i / self.SR, block / self.SR)
+                fired = sum(det.process(hf_rms(y[i:i + block], y[i - 1] if i else 0.0),
+                                        i / self.SR, block / self.SR)
                             for i in range(0, len(y) - block, block))
                 self.assertEqual(fired, 0, st.name["en"])
 
