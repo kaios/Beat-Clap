@@ -6,7 +6,7 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-VERSION="${VERSION:-0.3.0}"
+VERSION="${VERSION:-$(sed -n 's/^__version__ = "\(.*\)".*/\1/p' beatclap/__init__.py)}"
 VENV="${VENV:-$HOME/.venvs/beatclap-android}"
 STAGE=build/android
 

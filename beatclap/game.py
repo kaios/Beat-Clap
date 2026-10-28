@@ -6,7 +6,7 @@ import time
 import numpy as np
 import pygame
 
-from . import core, i18n, music, settings
+from . import __version__, core, i18n, music, settings
 from .device import ON_ANDROID
 from .audio import MIN_FLOOR, MicListener
 from .stages import CLEAR_RATIO, STAGES
@@ -559,6 +559,8 @@ class Game:
         self.draw_mic_meter(W // 2 - 120, 600, centered=True)
         test = "clap_detected" if time.perf_counter() - self.last_clap_wall < 0.6 else "clap_test"
         self.blit_center(self.ui_text(20, self.tr(test), DIM), W / 2, 575)
+        version = self.en_font(16).render(f"v{__version__}", True, DIM)
+        self.screen.blit(version, version.get_rect(bottomright=(W - 14, H - 12)))
         self.blit_center(self.ui_text(18, self.tr("menu_hint_touch" if ON_ANDROID else "menu_hint"),
                                       DIM), W / 2, H - 24)
 

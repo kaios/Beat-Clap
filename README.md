@@ -29,7 +29,7 @@ menu). The words to clap always stay in English.
 | Platform | Package | How |
 |---|---|---|
 | Debian / Ubuntu | `beat-clap_0.3.0_all.deb` | `sudo apt install ./beat-clap_0.3.0_all.deb`, then run `beat-clap` (use `apt`, not `dpkg -i`, so the mic library gets installed) |
-| Windows | `BeatClap.exe` | Double-click. It isn't code-signed, so SmartScreen may warn: choose "More info" → "Run anyway". |
+| Windows | `BeatClap_v0.3.0.exe` | Double-click. It isn't code-signed, so SmartScreen may warn: choose "More info" → "Run anyway". |
 | Android 10+ | `beatclap-0.3.0-arm64-v8a-debug.apk` | Copy it to the phone, open it, and allow installing from unknown sources. Allow the microphone on first launch. |
 
 Packages are built into `dist/` by the scripts in `packaging/` (see below).
@@ -68,12 +68,14 @@ beat-clap
 
 The package depends on `python3-pygame`, `python3-numpy` and `python3-pyaudio`
 (the mic). The maintainer field comes from your git identity; override it with
-`DEBFULLNAME` / `DEBEMAIL`. `build-deb.sh` and `build-apk.sh` take `VERSION=x.y.z`.
+`DEBFULLNAME` / `DEBEMAIL`. The version for every package comes from `__version__`
+in `beatclap/__init__.py`, so bump it there; the exe also carries it in its file
+properties, and the menu shows it.
 
 ## Windows .exe
 
 ```bash
-./packaging/build-exe.sh        # Linux: builds dist/BeatClap.exe under Wine
+./packaging/build-exe.sh        # Linux: builds dist/BeatClap_v0.3.0.exe under Wine
 ```
 
 The first run sets up a separate Wine prefix in `build/wine` with Windows Python

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build dist/BeatClap.exe on Linux by running Windows Python + PyInstaller under Wine.
+# Build dist/BeatClap_v<version>.exe on Linux by running Windows Python + PyInstaller under Wine.
 # PyInstaller can't cross-compile, so this keeps a dedicated Wine prefix with Windows
 # Python and the game's dependencies. First run sets it up (needs network); later runs reuse it.
 #   WINEPREFIX  prefix to use (default: build/wine, separate from ~/.wine)
@@ -28,4 +28,4 @@ if ! winpy -c "import PyInstaller" 2>/dev/null; then
 fi
 
 winpy packaging/build_exe.py --log-level WARN "$@"
-ls -l dist/BeatClap.exe
+ls -l dist/BeatClap_v$(sed -n 's/^__version__ = "\(.*\)".*/\1/p' beatclap/__init__.py).exe
