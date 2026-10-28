@@ -4,7 +4,7 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.3.0}"
 NAME="${DEBFULLNAME:-$(git config user.name)}"
 EMAIL="${DEBEMAIL:-$(git config user.email)}"
 PKG=beat-clap

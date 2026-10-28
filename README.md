@@ -16,10 +16,32 @@ the next.
 | 2 | Bubble Pop | 2–3 syllables | F major chiptune with arpeggios |
 | 3 | Midnight Funk | 3 syllables | E dorian funk: slap bass, clav, organ |
 | 4 | Island Breeze | 3–4 syllables | G major tropical marimba with offbeat organ |
-| 5 | Neon Finale | 4–5 syllables | A minor synthwave: saw lead, pad, arpeggios | Everything (shapes, metronome click, fonts) is generated in code
-or comes from the system. There are no asset files.
+| 5 | Neon Finale | 4–5 syllables | A minor synthwave: saw lead, pad, arpeggios |
 
-## Run
+The graphics, music, metronome click and app icon are all generated in code, and
+fonts come from the system. The only asset is the bundled voice (see below).
+
+The interface switches between English and Japanese (press **L**, or use the
+menu). The words to clap always stay in English.
+
+## Install
+
+| Platform | Package | How |
+|---|---|---|
+| Debian / Ubuntu | `beat-clap_0.3.0_all.deb` | `sudo apt install ./beat-clap_0.3.0_all.deb`, then run `beat-clap` (use `apt`, not `dpkg -i`, so the mic library gets installed) |
+| Windows | `BeatClap.exe` | Double-click. It isn't code-signed, so SmartScreen may warn: choose "More info" → "Run anyway". |
+| Android 10+ | `beatclap-0.3.0-arm64-v8a-debug.apk` | Copy it to the phone, open it, and allow installing from unknown sources. Allow the microphone on first launch. |
+
+Packages are built into `dist/` by the scripts in `packaging/` (see below).
+
+**First run: do a Mic check** (in the menu). You clap along to 8 beats with the
+music playing. The game measures how loud your claps are compared to the room
+and to its own voice, and how late your mic delivers sound. It then sets the
+clap threshold and timing offset for you. Settings are saved to
+`~/.config/beat-clap/settings.json` (`%APPDATA%\BeatClap` on Windows, app
+storage on Android).
+
+## Run from source
 
 ```bash
 pip install -r requirements.txt     # pygame, numpy, sounddevice (or pyaudio)
@@ -28,7 +50,7 @@ python -m beatclap --list-devices
 ```
 
 If neither `sounddevice` nor `pyaudio` can open a mic, the game falls back to
-**SPACE** as the clap key.
+**SPACE** (or a tap / click on the screen) as the clap.
 
 The voice is a natural neural voice (Kokoro, voice `af_heart`), pre-rendered once
 and bundled as `beatclap/voice_clips.npz` (4.6 MB): every word, every syllable,
@@ -36,22 +58,17 @@ and the mic-check count. To regenerate it after changing the word list, see
 `tools/generate_voice.py`. Any word missing from the bundle falls back to the
 system's speech engine (`espeak-ng`, macOS `say`, or Windows SAPI).
 
-**First run: do a Mic check** (in the menu). You clap along to 8 beats with the
-music playing. The game measures how loud your claps are compared to the room
-and to its own voice, and how late your mic delivers sound. It then sets the
-clap threshold and timing offset for you. Settings are saved to
-`~/.config/beat-clap/settings.json` (`%APPDATA%\BeatClap` on Windows).
-
 ## Debian package
 
 ```bash
-./packaging/build-deb.sh                      # -> dist/beat-clap_0.1.0_all.deb
-sudo apt install ./dist/beat-clap_0.1.0_all.deb
+./packaging/build-deb.sh                      # -> dist/beat-clap_0.3.0_all.deb
+sudo apt install ./dist/beat-clap_0.3.0_all.deb
 beat-clap
 ```
 
-The maintainer field comes from your git identity; override it with
-`DEBFULLNAME` / `DEBEMAIL`, and the version with `VERSION=0.2.0`.
+The package depends on `python3-pygame`, `python3-numpy` and `python3-pyaudio`
+(the mic). The maintainer field comes from your git identity; override it with
+`DEBFULLNAME` / `DEBEMAIL`. `build-deb.sh` and `build-apk.sh` take `VERSION=x.y.z`.
 
 ## Windows .exe
 
@@ -63,7 +80,7 @@ The first run sets up a separate Wine prefix in `build/wine` with Windows Python
 3.11 and the pinned dependencies (it needs network access). Later runs reuse it.
 On Windows itself, install the same packages and run `py packaging\build_exe.py`.
 
-The exe is a single 33 MB file with Python and all libraries bundled. It uses the
+The exe is a single 38 MB file with Python and all libraries bundled. It uses the
 bundled Kokoro voice and Japanese fonts that come with Windows (Yu
 Gothic, Meiryo, MS Gothic).
 
@@ -90,20 +107,23 @@ drawn in code (`packaging/android/make_icon.py`).
 
 | Piece | Where | Details |
 |---|---|---|
-| Audio capture | `beatclap/audio.py` `MicListener` | 256-sample blocks at 48 kHz (~5 ms) go into a 1 s ring buffer. RMS is computed per block on the first difference of the signal, a gentle high-pass: claps are broadband, while speech and music sit mostly low, so on this level an equally loud clap reads about 4.7× louder than a spoken syllable. Timestamps come from the ADC clock, mapped to `perf_counter`. |
+| Audio capture | `beatclap/audio.py` `MicListener` | sounddevice or PyAudio on desktop, `AudioRecord` on Android. 256-sample blocks at 48 kHz (44.1 kHz on Android, ~5 ms) go into a 1 s ring buffer. RMS is computed per block on the first difference of the signal, a gentle high-pass: claps are broadband, while speech and music sit mostly low, so on this level an equally loud clap reads about 4.7× louder than a spoken syllable. Timestamps come from the ADC clock, mapped to `perf_counter`. |
 | Clap detector | `ClapDetector` | Fires when `rms > ambient_floor * 2.5` (adjustable as "Clap threshold", 1.3–3.0, set by the mic check), then blocks for **150 ms**. The level must also fall back below threshold before the next clap, so one sustained noise counts once. The floor adapts only on quiet blocks. |
 | Voice | `beatclap/voice.py`, `words.SPOKEN` | The word is spoken on beat 1 of its read bar. Each syllable is spoken so its vowel onset (where the loudness first reaches half its peak) lands on the node. Syllables use respellings (`U-NI-VER-SI-TY` is spoken as `you-nih-ver-sih-tee`) so TTS doesn't read letter names. |
 | Self-trigger guard | `ClapDetector.measure_voice` / `guard_voice` | While the word preview plays, the detector records how loud the game's voice is at the mic (no claps register then). While a syllable plays, a clap must be 1.2× louder than that, so speaker output can't score points by itself. |
 | Music | `beatclap/music.py`, `beatclap/stages.py` | Each song is an 8-bar loop at exactly 100 BPM, synthesized with numpy when the stage starts. Sample 0 is beat 0, so the music stays locked to the rail. It plays on its own mixer channel and peaks at about a third of the voice's level. |
 | Music vs. the mic | `music.tame_transients`, `ClapDetector.rewarm` | Hits whose 5 ms RMS rises more than 1.6× above the loop's running average get softened, so drums can never reach the detector's 2.5× threshold. When a stage starts, the detector re-learns the background level with the music playing. If the room stays louder for 0.3 s or more (a fan, for example), the floor follows it instead of getting stuck. |
+| Mic check | `Game.start_calibration` / `measure_calibration` | Plays a spoken count of four, then 8 beats to clap on. For each beat it finds the loudest block within ±250 ms. From those it sets the timing offset (median) and the clap threshold (half the claps' median loudness over the room, never above 2.5×), and warns if the game's voice is nearly as loud as the claps. |
+| Settings | `beatclap/settings.py` | Language, voice / music / metronome toggles, timing offset and clap threshold, saved as JSON when you quit or save a mic check. |
 | Chart | `beatclap/core.py` `build_chart` | Each word gets one read bar, then one syllable per beat starting on the next downbeat, padded to whole bars. |
 | Judging | `judge`, `Session` | Each syllable matched by a clap scores **1 point**. The flash shows timing: ±75 ms is **PERFECT**, ±150 ms is **GOOD**. A missed syllable or a clap outside every window resets the combo. |
-| UI / i18n | `beatclap/game.py`, `beatclap/i18n.py` | Press **L** anywhere to switch English / 日本語. Word prompts always stay English. A Japanese system font is picked automatically (Noto CJK, IPA, Hiragino, Yu Gothic, Meiryo, ...). |
+| UI / i18n | `beatclap/game.py`, `beatclap/i18n.py` | Keyboard, mouse and touch all work. Press **L** anywhere to switch English / 日本語. Word prompts always stay English. A Japanese system font is picked automatically (Noto CJK, IPA, Hiragino, Yu Gothic, Meiryo, Android's system fonts, ...); when a CJK font has no Latin letters, English runs in a line are drawn with the Latin font. |
 
 ## Controls
 
 Menu: `UP`/`DOWN` select, `LEFT`/`RIGHT` change the stage or clap threshold, `ENTER` confirm.
-The mouse or touch works everywhere too: click menu items and the on-screen buttons.
+The mouse or touch works everywhere too: click or tap menu items (the `<` / `>` ends
+change a value) and the on-screen buttons. On Android, Back acts as `ESC`.
 In play: `SPACE` clap (keyboard) · `[` / `]` mic latency offset ±5 ms · `M` metronome
 click · `L` language · `ESC` menu
 
@@ -123,3 +143,9 @@ The voice was generated with [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-
 ```bash
 python -m unittest
 ```
+
+The tests cover timing and scoring, the clap detector (including a full mic
+pipeline test with music and the game's voice leaking in), the music loops (none
+of them may trigger the detector), the voice bundle, settings, and headless UI
+tests that draw every screen with and without a mic, in both languages and in
+Android layout, and drive the touch controls.
