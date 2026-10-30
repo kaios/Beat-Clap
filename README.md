@@ -18,6 +18,17 @@ the next.
 | 4 | Island Breeze | 3–4 syllables | G major tropical marimba with offbeat organ |
 | 5 | Neon Finale | 4–5 syllables | A minor synthwave: saw lead, pad, arpeggios |
 
+**Syllable stress** is shown on every word: the stressed syllable is written in
+capitals on a big gold node (`ba-NA-na`), and the voice says it louder.
+
+- **Stress mode** (optional, in the menu, needs a mic) is the advanced challenge: clap
+  loud on the big node and soft on the small ones. Each word gets a verdict, shown
+  as a separate Stress count. Points don't change: still 1 per syllable.
+- **Word cards** (on by default) appear after you hit every syllable of a word, with a
+  picture, its meaning and an example sentence. In Japanese mode the meaning and
+  sentence are also given in Japanese. Turning them on adds one bar between words
+  for reading time, and the music keeps going.
+
 The graphics, music, metronome click and app icon are all generated in code, and
 fonts come from the system. The only asset is the bundled voice (see below).
 
@@ -28,9 +39,9 @@ menu). The words to clap always stay in English.
 
 | Platform | Package | How |
 |---|---|---|
-| Debian / Ubuntu | `beat-clap_0.3.0_all.deb` | `sudo apt install ./beat-clap_0.3.0_all.deb`, then run `beat-clap` (use `apt`, not `dpkg -i`, so the mic library gets installed) |
-| Windows | `BeatClap_v0.3.0.exe` | Double-click. It isn't code-signed, so SmartScreen may warn: choose "More info" → "Run anyway". |
-| Android 10+ | `beatclap-0.3.0-arm64-v8a-debug.apk` | Copy it to the phone, open it, and allow installing from unknown sources. Allow the microphone on first launch. |
+| Debian / Ubuntu | `beat-clap_0.4.0_all.deb` | `sudo apt install ./beat-clap_0.4.0_all.deb`, then run `beat-clap` (use `apt`, not `dpkg -i`, so the mic library gets installed) |
+| Windows | `BeatClap_v0.4.0.exe` | Double-click. It isn't code-signed, so SmartScreen may warn: choose "More info" → "Run anyway". |
+| Android 10+ | `beatclap-0.4.0-arm64-v8a-debug.apk` | Copy it to the phone, open it, and allow installing from unknown sources. Allow the microphone on first launch. |
 
 Packages are built into `dist/` by the scripts in `packaging/` (see below).
 
@@ -61,8 +72,8 @@ system's speech engine (`espeak-ng`, macOS `say`, or Windows SAPI).
 ## Debian package
 
 ```bash
-./packaging/build-deb.sh                      # -> dist/beat-clap_0.3.0_all.deb
-sudo apt install ./dist/beat-clap_0.3.0_all.deb
+./packaging/build-deb.sh                      # -> dist/beat-clap_0.4.0_all.deb
+sudo apt install ./dist/beat-clap_0.4.0_all.deb
 beat-clap
 ```
 
@@ -75,7 +86,7 @@ properties, and the menu shows it.
 ## Windows .exe
 
 ```bash
-./packaging/build-exe.sh        # Linux: builds dist/BeatClap_v0.3.0.exe under Wine
+./packaging/build-exe.sh        # Linux: builds dist/BeatClap_v0.4.0.exe under Wine
 ```
 
 The first run sets up a separate Wine prefix in `build/wine` with Windows Python
@@ -89,7 +100,7 @@ Gothic, Meiryo, MS Gothic).
 ## Android .apk
 
 ```bash
-./packaging/build-apk.sh        # -> dist/beatclap-0.3.0-arm64-v8a-debug.apk
+./packaging/build-apk.sh        # -> dist/beatclap-0.4.0-arm64-v8a-debug.apk
 ```
 
 This builds with buildozer / python-for-android, using the Android SDK/NDK in
@@ -117,7 +128,9 @@ drawn in code (`packaging/android/make_icon.py`).
 | Music vs. the mic | `music.tame_transients`, `ClapDetector.rewarm` | Hits whose 5 ms RMS rises more than 1.6× above the loop's running average get softened, so drums can never reach the detector's 2.5× threshold. When a stage starts, the detector re-learns the background level with the music playing. If the room stays louder for 0.3 s or more (a fan, for example), the floor follows it instead of getting stuck. |
 | Mic check | `Game.start_calibration` / `measure_calibration` | Plays a spoken count of four, then 8 beats to clap on. For each beat it finds the loudest block within ±250 ms. From those it sets the timing offset (median) and the clap threshold (half the claps' median loudness over the room, never above 2.5×), and warns if the game's voice is nearly as loud as the claps. |
 | Settings | `beatclap/settings.py` | Language, voice / music / metronome toggles, timing offset and clap threshold, saved as JSON when you quit or save a mic check. |
-| Chart | `beatclap/core.py` `build_chart` | Each word gets one read bar, then one syllable per beat starting on the next downbeat, padded to whole bars. |
+| Chart | `beatclap/core.py` `build_chart` | Each word gets one read bar, then one syllable per beat starting on the next downbeat, padded to whole bars, plus one extra bar with word cards on. |
+| Stress | `words.STRESS`, `core.stress_verdict` | Primary stress per word, by dictionary pronunciation. Each clap's strength is its loudest block in the 30 ms after onset. A word passes if its stressed clap is at least 1.4× the median of its unstressed claps. Comparing within a word means mic gain and distance don't matter. One-syllable words and keyboard claps aren't judged. |
+| Word cards | `beatclap/wordinfo.py`, `beatclap/pictures.py` | Meanings and examples for every word in English and Japanese. Pictures are drawn from shape lists in code, so there are still no image files. |
 | Judging | `judge`, `Session` | Each syllable matched by a clap scores **1 point**. The flash shows timing: ±75 ms is **PERFECT**, ±150 ms is **GOOD**. A missed syllable or a clap outside every window resets the combo. |
 | UI / i18n | `beatclap/game.py`, `beatclap/i18n.py` | Keyboard, mouse and touch all work. Press **L** anywhere to switch English / 日本語. Word prompts always stay English. A Japanese system font is picked automatically (Noto CJK, IPA, Hiragino, Yu Gothic, Meiryo, Android's system fonts, ...); when a CJK font has no Latin letters, English runs in a line are drawn with the Latin font. |
 
@@ -146,7 +159,7 @@ The voice was generated with [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-
 python -m unittest
 ```
 
-The tests cover timing and scoring, the clap detector (including a full mic
+The tests cover timing and scoring, syllable stress, word cards, the clap detector (including a full mic
 pipeline test with music and the game's voice leaking in), the music loops (none
 of them may trigger the detector), the voice bundle, settings, and headless UI
 tests that draw every screen with and without a mic, in both languages and in

@@ -8,6 +8,8 @@ DEFAULTS = {
     "voice_on": True,
     "music_on": True,
     "metronome": False,
+    "stress_mode": False,
+    "word_cards": True,
     "offset_ms": 0,
     "threshold": 2.5,   # clap = high-band RMS above this many times the room's floor
 }

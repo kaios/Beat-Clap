@@ -6,30 +6,38 @@ import time
 import numpy as np
 import pygame
 
-from . import __version__, core, i18n, music, settings
+from . import __version__, core, i18n, music, pictures, settings
 from .device import ON_ANDROID
 from .audio import MIN_FLOOR, MicListener
 from .stages import CLEAR_RATIO, STAGES
 from .voice import Voice
+from .wordinfo import WORD_INFO
+from .words import stressed_spelling, syllable_label
 
 W, H = 1280, 720
 HIT_X = 260
 RAIL_Y = 440
 PX_PER_MS = 0.32            # 192 px per beat
 NODE_R = 26
+STRESSED_NODE_R = 36
+UNSTRESSED_NODE_R = 21      # stress mode: small nodes mean soft claps
 FLASH_MS = 550
-AUDIO_GRACE_MS = 60
+AUDIO_GRACE_MS = 90         # includes the 30 ms a clap takes to be measured
+UNSTRESSED_VOICE_VOLUME = 0.55
+STRESS_FLASH_X = 1040       # clear of the hint line under the word
+CARD_REST_BARS = 1          # extra bar between words when word cards are on
+CARD_PICTURE = 130
 OUTPUT_LATENCY_MS = 20      # mixer output latency: sounds start this early to be heard on time
 VOICE_GUARD_MARGIN_MS = 80  # extra time either side of a clip for speaker-to-mic delay
 MUSIC_VOLUME = 0.35         # music peaks at ~0.18 after this, well under the voice's 0.8
 MUSIC_REWARM_S = 1.0        # let the clap detector re-learn the room once music starts
-MENU = ("start", "stage", "mic_check", "threshold", "language", "voice", "music", "metronome",
-        "quit")
+MENU = ("start", "stage", "mic_check", "threshold", "stress_mode", "word_cards", "language",
+        "voice", "music", "metronome", "quit")
 THRESHOLD_MIN, THRESHOLD_MAX = 1.3, 3.0
 # Mic check timeline, in beats: 2 lead-in, a spoken 4 count, then 8 claps.
 CAL_COUNT_FROM, CAL_CLAP_FROM, CAL_CLAPS = 2, 6, 8
 CAL_WINDOW_MS = 250
-MENU_Y, MENU_STEP = 200, 40     # menu rows: centre of the first, spacing
+MENU_Y, MENU_STEP = 186, 35     # menu rows: centre of the first, spacing
 BUTTON_W, BUTTON_H = 250, 58
 
 BG = (14, 17, 30)
@@ -102,8 +110,8 @@ def make_click(freq, ms=30, volume=0.5):
 
 
 class Flash:
-    def __init__(self, text, color, born, sub=""):
-        self.text, self.color, self.born, self.sub = text, color, born, sub
+    def __init__(self, text, color, born, sub="", x=HIT_X):
+        self.text, self.color, self.born, self.sub, self.x = text, color, born, sub, x
 
 
 class Game:
@@ -125,6 +133,8 @@ class Game:
         self.metronome = saved["metronome"]
         self.voice_on = saved["voice_on"]
         self.music_on = saved["music_on"]
+        self.stress_mode = saved["stress_mode"]
+        self.word_cards = saved["word_cards"]
         self.stage_index = 0
         self.cleared = False
         self.offset_ms = saved["offset_ms"]
@@ -148,7 +158,8 @@ class Game:
 
     def save_settings(self):
         settings.save({"lang": self.lang, "voice_on": self.voice_on, "music_on": self.music_on,
-                       "metronome": self.metronome, "offset_ms": self.offset_ms,
+                       "metronome": self.metronome, "stress_mode": self.stress_mode,
+                       "word_cards": self.word_cards, "offset_ms": self.offset_ms,
                        "threshold": round(self.mic.detector.ratio, 1)})
 
     # ---------- helpers ----------
@@ -306,12 +317,21 @@ class Game:
             self.voice_on = not self.voice_on
         elif item == "music":
             self.music_on = not self.music_on
+        elif item == "stress_mode":
+            if self.mic.backend:
+                self.stress_mode = not self.stress_mode
+        elif item == "word_cards":
+            self.word_cards = not self.word_cards
         elif item == "metronome":
             self.metronome = not self.metronome
         else:
             self.state = "quit"
 
     # ---------- session ----------
+
+    @property
+    def stress_active(self):
+        return self.stress_mode and self.mic.backend is not None
 
     @property
     def stage(self):
@@ -323,11 +343,15 @@ class Game:
     def start_session(self):
         pool = self.stage.pool()
         words = random.sample(pool, min(self.num_words, len(pool)))
-        self.session = core.Session(core.build_chart(words))
+        rest_bars = CARD_REST_BARS if self.word_cards else 0
+        self.session = core.Session(core.build_chart(words, rest_bars=rest_bars))
+        self.card = None
         self.screen.fill(BG)
         self.blit_center(self.ui_text(36, self.stage_label(), CYAN), W / 2, H / 2 - 30)
         self.blit_center(self.ui_text(24, self.tr("loading"), DIM), W / 2, H / 2 + 20)
         pygame.display.flip()
+        self.card_pictures = ({w: pictures.render(w, CARD_PICTURE) for w in words}
+                              if self.word_cards else {})
         self.cues = self.build_voice_cues() if self.voice_on and self.voice.available else []
         song = self.stage_music() if self.music_on and self.music_channel else None
         self.cue_index = 0
@@ -368,6 +392,8 @@ class Game:
             for tgt in seg.targets:
                 clip = self.voice.syllable_clip(seg.word, tgt.syl_index)
                 if clip:
+                    # Clips are per word and syllable, so this volume is theirs alone.
+                    clip.sound.set_volume(1.0 if tgt.stressed else UNSTRESSED_VOICE_VOLUME)
                     cues.append((tgt.time_ms - clip.onset_ms - OUTPUT_LATENCY_MS, clip, False))
         cues.sort(key=lambda c: c[0])
         return cues
@@ -384,7 +410,7 @@ class Game:
             if is_preview:
                 self.mic.detector.measure_voice(start, end)
             else:
-                self.mic.detector.guard_voice(start, end)
+                self.mic.detector.guard_voice(start, end, clip.sound.get_volume())
 
     # ---------- mic check ----------
 
@@ -420,7 +446,7 @@ class Game:
             return
         now = self.now_ms()
         self.play_due_cues(now)
-        for clap_wall in self.drain_mic():
+        for clap_wall, _ in self.drain_mic():
             self.last_clap_wall = time.perf_counter()
             beat = round((clap_wall - self.t0) * 1000.0 / core.BEAT_MS)
             if CAL_CLAP_FROM <= beat < CAL_CLAP_FROM + CAL_CLAPS:
@@ -458,9 +484,9 @@ class Game:
             )
         return result
 
-    def on_clap(self, clap_ms):
+    def on_clap(self, clap_ms, level=None):
         self.last_clap_wall = time.perf_counter()
-        result, dt, _ = self.session.handle_clap(clap_ms)
+        result, dt, _ = self.session.handle_clap(clap_ms, level)
         sub = ""
         if dt is not None and abs(dt) >= 1:
             sub = self.tr("late" if dt > 0 else "early", ms=int(round(abs(dt))))
@@ -471,12 +497,12 @@ class Game:
             self.last_clap_wall = time.perf_counter()
 
     def update_play(self):
-        for clap_wall in self.drain_mic():
+        for clap_wall, level in self.drain_mic():
             clap_ms = (clap_wall - self.t0) * 1000.0 - self.offset_ms
             # The lead-in has nothing to hit, and it's where the music's onset could
             # slip past the detector before it re-learns the room; don't count it.
             if clap_ms >= self.session.segments[0].start_ms:
-                self.on_clap(clap_ms)
+                self.on_clap(clap_ms, level)
 
         now = self.now_ms()
         self.play_due_cues(now)
@@ -484,6 +510,8 @@ class Game:
         # so give late-window claps time to arrive before calling a miss.
         for _ in self.session.update(now - AUDIO_GRACE_MS):
             self.flashes.append(Flash("MISS", RED, now))
+        for seg in self.session.finished_segments():
+            self.on_word_finished(seg, now)
 
         beat = int(now // core.BEAT_MS)
         if beat > self.last_beat:
@@ -498,6 +526,27 @@ class Game:
             self.cleared = self.session.scorer.score >= math.ceil(total * CLEAR_RATIO)
             self.stop_music(1500)
             self.state = "results"
+
+    def on_word_finished(self, seg, now):
+        if self.stress_active:
+            verdict = core.stress_verdict(seg)
+            if verdict is not None:
+                sc = self.session.scorer
+                sc.stress_total += 1
+                sc.stress_right += verdict
+                if verdict:
+                    self.flashes.append(Flash("STRESS!", GOLD, now, x=STRESS_FLASH_X))
+                else:
+                    syl = seg.stressed_target.syllable
+                    self.flashes.append(Flash("STRESS?", RED, now, self.tr("stress_louder", syl=syl),
+                                              x=STRESS_FLASH_X))
+        if self.word_cards and seg.all_hit:
+            # Up until the next word's claps are about to start.
+            segments = self.session.segments
+            index = segments.index(seg) + 1
+            until = (segments[index].targets[0].time_ms - core.BEAT_MS if index < len(segments)
+                     else seg.end_ms)
+            self.card = (seg.word, until)
 
     # ---------- drawing ----------
 
@@ -540,6 +589,9 @@ class Game:
             f"<  {self.stage_label()}  >",
             self.tr("mic_check") if self.mic.backend else self.tr("mic_check_none"),
             f"<  {self.tr('threshold', x=self.mic.detector.ratio)}  >",
+            self.tr("stress_mode", state=self.tr("on" if self.stress_mode else "off"))
+            if self.mic.backend else self.tr("stress_mode_none"),
+            self.tr("word_cards", state=self.tr("on" if self.word_cards else "off")),
             self.tr("language"),
             self.tr("voice", state=self.tr("on" if self.voice_on else "off"))
             if self.voice.available else self.tr("no_voice"),
@@ -549,7 +601,7 @@ class Game:
         ]
         for i, label in enumerate(items):
             sel = i == self.menu_index
-            surf = self.ui_text(28, label, GOLD if sel else TEXT)
+            surf = self.ui_text(26, label, GOLD if sel else TEXT)
             cy = MENU_Y + i * MENU_STEP
             self.blit_center(surf, W / 2, cy)
             if sel:
@@ -638,7 +690,8 @@ class Game:
             if x1 < -NODE_R * 3 or x0 > W + NODE_R * 3:
                 continue
             pygame.draw.line(self.screen, (40, 90, 120), (x0, RAIL_Y), (x1, RAIL_Y), 8)
-            self.screen.blit(word_font.render(seg.word, True, DIM), (x0 - NODE_R, RAIL_Y - 100))
+            self.screen.blit(word_font.render(stressed_spelling(seg.word), True, DIM),
+                             (x0 - NODE_R, RAIL_Y - 100))
             for tgt in seg.targets:
                 self.draw_node(tgt, now, label_font)
 
@@ -658,28 +711,35 @@ class Game:
             pygame.draw.line(self.screen, RED, (x - d, RAIL_Y + d), (x + d, RAIL_Y - d), 2)
             color = (120, 60, 70)
         else:
-            pygame.draw.circle(self.screen, CYAN, (x, RAIL_Y), NODE_R)
-            pygame.draw.circle(self.screen, TEXT, (x, RAIL_Y), NODE_R, 2)
+            if tgt.stressed:
+                r, fill, ring = STRESSED_NODE_R, GOLD, 4
+            else:
+                r, fill, ring = UNSTRESSED_NODE_R if self.stress_active else NODE_R, CYAN, 2
+            pygame.draw.circle(self.screen, fill, (x, RAIL_Y), r)
+            pygame.draw.circle(self.screen, TEXT, (x, RAIL_Y), r, ring)
             color = TEXT
-        self.blit_center(font.render(tgt.syllable, True, color), x, RAIL_Y + NODE_R + 24)
+        self.blit_center(font.render(syllable_label(tgt.syllable, tgt.stressed), True, color),
+                         x, RAIL_Y + STRESSED_NODE_R + 18)
 
     def draw_word_prompt(self, now):
         seg = self.session.segment_at(now)
         if seg is None:
             return
-        font = self.en_font(92)
+        font, small = self.en_font(92), self.en_font(62)
         pieces = []
         for i, tgt in enumerate(seg.targets):
             if i:
-                pieces.append(font.render("-", True, DIM))
-            pieces.append(font.render(tgt.syllable, True, RESULT_COLOR.get(tgt.result, TEXT)))
+                pieces.append(small.render("-", True, DIM))
+            text = syllable_label(tgt.syllable, tgt.stressed)
+            pieces.append((font if tgt.stressed else small).render(
+                text, True, RESULT_COLOR.get(tgt.result, TEXT)))
         total = sum(p.get_width() for p in pieces)
         x = (W - total) / 2
         for p in pieces:
-            self.screen.blit(p, (x, 150))
+            self.screen.blit(p, p.get_rect(bottomleft=(x, 240)))
             x += p.get_width()
         reading = seg.targets and now < seg.targets[0].time_ms - core.BEAT_MS * 2
-        hint = self.tr("listen" if reading else "go")
+        hint = self.tr("listen" if reading else "go_stress" if self.stress_active else "go")
         self.blit_center(self.ui_text(26, hint, DIM), W / 2, 265)
 
     def draw_hud(self):
@@ -690,6 +750,9 @@ class Game:
         self.screen.blit(self.ui_text(20, self.tr("combo"), DIM), (230, 18))
         self.screen.blit(big.render(str(sc.combo), True, TEXT), (230, 40))
         self.blit_center(self.ui_text(22, self.stage_label(), DIM), W / 2, 34)
+        if self.stress_active:
+            self.screen.blit(self.ui_text(20, self.tr("stress_label"), DIM), (330, 18))
+            self.screen.blit(big.render(f"{sc.stress_right}/{sc.stress_total}", True, GOLD), (330, 40))
         self.draw_mic_meter(W - 280, 26)
         if self.mic.backend:
             off = self.ui_text(16, self.tr("offset", ms=self.offset_ms), DIM)
@@ -705,16 +768,54 @@ class Game:
             scale = 1.0 + 0.25 * max(0.0, 1 - age * 4)
             surf = self.en_font(int(54 * scale)).render(f.text, True, f.color)
             surf.set_alpha(int(255 * (1 - age)))
-            self.blit_center(surf, HIT_X, RAIL_Y - 150 - age * 30)
+            self.blit_center(surf, f.x, RAIL_Y - 150 - age * 30)
             if f.sub:
                 sub = self.ui_text(20, f.sub, f.color)
                 sub.set_alpha(int(255 * (1 - age)))
-                self.blit_center(sub, HIT_X, RAIL_Y + 110)
+                self.blit_center(sub, f.x, RAIL_Y + 110 if f.x == HIT_X else RAIL_Y - 105)
+
+    def wrapped(self, size, text, color, lang, width):
+        """Render text as lines no wider than width: on spaces, or anywhere for Japanese."""
+        fonts = self.fonts
+        lines, line = [], ""
+        for piece in (text.split(" ") if lang == "en" else list(text)):
+            joined = f"{line} {piece}" if line and lang == "en" else line + piece
+            if line and fonts.render(size, joined, color, lang).get_width() > width:
+                lines.append(line)
+                line = piece
+            else:
+                line = joined
+        return [fonts.render(size, part, color, lang) for part in lines + [line]]
+
+    def draw_word_card(self, now):
+        if not self.card or now >= self.card[1]:
+            return
+        word = self.card[0]
+        picture = self.card_pictures[word]
+        en_meaning, ja_meaning, example, ja_example = WORD_INFO.get(word, ("", "", "", ""))
+        panel = pygame.Rect(380, 524, 720, 156)
+        pygame.draw.rect(self.screen, (28, 33, 52), panel, border_radius=14)
+        self.screen.blit(picture, (panel.x + 13, panel.y + 13))
+        x, width = panel.x + CARD_PICTURE + 30, panel.w - CARD_PICTURE - 44
+        title = self.en_font(26).render(word.replace("-", "").lower(), True, GOLD)
+        lines = [title]
+        if self.lang == "ja":
+            lines += self.wrapped(20, ja_meaning, TEXT, "ja", width)
+            lines += self.wrapped(19, example, CYAN, "en", width)
+            lines += self.wrapped(18, ja_example, DIM, "ja", width)
+        else:
+            lines += self.wrapped(20, en_meaning, TEXT, "en", width)
+            lines += self.wrapped(20, example, CYAN, "en", width)
+        y = panel.y + 12
+        for surf in lines:
+            self.screen.blit(surf, (x, y))
+            y += surf.get_height() + 5
 
     def draw_play(self):
         now = self.now_ms()
         self.draw_word_prompt(now)
         self.draw_rail(now)
+        self.draw_word_card(now)
         self.draw_flashes(now)
         self.draw_hud()
 
@@ -746,8 +847,10 @@ class Game:
             (self.tr("max_combo"), str(sc.max_combo), TEXT),
             (self.tr("accuracy"), f"{accuracy:.1f}%", TEXT),
         ]
+        if self.stress_active:
+            rows.append((self.tr("stress_row"), f"{sc.stress_right} / {sc.stress_total}", GOLD))
         for i, (label, value, color) in enumerate(rows):
-            y = 240 + i * 56
+            y = 232 + i * (56 if len(rows) <= 6 else 48)
             l = self.ui_text(34, label, DIM)
             self.screen.blit(l, l.get_rect(midright=(W // 2 - 30, y)))
             v = self.en_font(40).render(value, True, color)

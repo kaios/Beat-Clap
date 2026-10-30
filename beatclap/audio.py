@@ -14,6 +14,7 @@ MIN_FLOOR = 0.0015        # keeps the floor from collapsing to 0 on digitally si
 FLOOR_TAU_S = 0.75        # time constant of the ambient floor tracker
 WARMUP_S = 0.25           # initial ambient measurement before detection is armed
 VOICE_GUARD_RATIO = 1.2   # while the game is speaking, claps must beat its own voice by this much
+STRENGTH_WINDOW_S = 0.03  # a clap's strength is its loudest block over this long after onset
 SUSTAIN_S = 0.3           # a level held above threshold this long is new ambience, not a clap
 
 
@@ -67,6 +68,7 @@ class ClapDetector:
         # Written from the game thread, read in the audio thread (plain float swaps).
         self.measure_from = self.measure_until = float("-inf")
         self.guard_from = self.guard_until = float("-inf")
+        self.guard_volume = 1.0
         self._measure_peak = 0.0
         self.voice_peaks = collections.deque(maxlen=3)
 
@@ -85,7 +87,9 @@ class ClapDetector:
     def measure_voice(self, start, end):
         self.measure_from, self.measure_until = start, end
 
-    def guard_voice(self, start, end):
+    def guard_voice(self, start, end, volume=1.0):
+        """volume: how loud this clip plays relative to the measured preview."""
+        self.guard_volume = volume
         self.guard_from, self.guard_until = start, end
 
     def rewarm(self, seconds=1.0):
@@ -114,7 +118,7 @@ class ClapDetector:
         threshold = self.threshold
         guarded = self.guard_from <= t < self.guard_until
         if guarded:
-            threshold = max(threshold, self.voice_threshold)
+            threshold = max(threshold, self.voice_threshold * self.guard_volume)
         if level > threshold:
             if self._above_since is None:
                 self._above_since = t
@@ -133,7 +137,8 @@ class ClapDetector:
 
 
 class MicListener:
-    """Streams mic blocks into a ring buffer and pushes clap times (perf_counter seconds) to `claps`."""
+    """Streams mic blocks into a ring buffer. Each clap goes to `claps` as (perf_counter seconds,
+    strength), a moment after its onset so that the strength covers the clap's peak."""
 
     def __init__(self, device=None, samplerate=48000, blocksize=256, buffer_s=1.0):
         self.device = device
@@ -145,6 +150,7 @@ class MicListener:
         # (peak time, level) per block over the last ~12 s, for the mic check screen
         self.history = collections.deque(maxlen=int(12 * samplerate / blocksize))
         self._prev_sample = 0.0
+        self._clap = None  # [time, strongest level so far, blocks left] while measuring a clap
         self.backend = None
         self.device_name = ""
         self.error = None
@@ -188,8 +194,15 @@ class MicListener:
         # Refine timing to the loudest sample inside the block.
         peak_t = block_start + int(np.argmax(np.abs(mono))) / self.samplerate if n else block_start
         self.history.append((peak_t, level))
+        if self._clap is not None:
+            self._clap[1] = max(self._clap[1], level)
+            self._clap[2] -= 1
+            if self._clap[2] <= 0:
+                self.claps.put((self._clap[0], self._clap[1]))
+                self._clap = None
         if self.detector.process(level, block_start, n / self.samplerate):
-            self.claps.put(peak_t)
+            blocks = max(1, round(STRENGTH_WINDOW_S * self.samplerate / max(n, 1)))
+            self._clap = [peak_t, level, blocks]
 
     def _start_android(self):
         """AudioRecord through pyjnius. Opening waits for the RECORD_AUDIO permission, so it

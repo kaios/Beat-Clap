@@ -133,6 +133,83 @@ class UITest(unittest.TestCase):
         finally:
             game.ON_ANDROID = old
 
+    def clap_word(self, seg, levels=None):
+        g = self.g
+        for i, tgt in enumerate(seg.targets):
+            g.t0 = time.perf_counter() - tgt.time_ms / 1000
+            g.on_clap(g.now_ms(), levels[i] if levels else None)
+        g.update_play()
+
+    def test_word_card_shows_only_after_every_syllable_is_hit(self):
+        g = self.g
+        g.lang = "en"
+        g.start_session()
+        first, second = g.session.segments[:2]
+        self.assertGreaterEqual(first.end_ms - first.targets[-1].time_ms, 2400)  # room to read
+        g.t0 = time.perf_counter() - first.targets[-1].time_ms / 1000 - 0.3      # missed it all
+        g.update_play()
+        self.assertIsNone(g.card)
+        self.clap_word(second)
+        self.assertEqual(g.card[0], second.word)
+        for lang in ("en", "ja"):
+            g.lang = lang
+            self.draw()
+        g.t0 = time.perf_counter() - g.card[1] / 1000 - 0.01                     # time's up: gone
+        self.draw()
+
+    def test_word_cards_can_be_turned_off(self):
+        g = self.g
+        g.word_cards = False
+        g.start_session()
+        self.clap_word(g.session.segments[0])
+        self.assertIsNone(g.card)
+
+    def test_stress_mode_counts_words_but_not_points(self):
+        g = self.g
+        self.fake_mic()
+        g.stress_mode = True
+        g.num_words = 8
+        g.stage_index = 2                                       # three-syllable words
+        g.start_session()
+        seg = g.session.segments[0]
+        levels = [0.3 if t.stressed else 0.1 for t in seg.targets]
+        self.clap_word(seg, levels)
+        sc = g.session.scorer
+        self.assertEqual((sc.stress_right, sc.stress_total), (1, 1))
+        self.assertEqual(sc.score, 3)
+        self.assertTrue(any(f.text == "STRESS!" for f in g.flashes))
+        seg = g.session.segments[1]
+        self.clap_word(seg, [0.2] * len(seg.targets))           # flat: all the same
+        self.assertEqual((sc.stress_right, sc.stress_total), (1, 2))
+        self.assertTrue(any(f.text == "STRESS?" for f in g.flashes))
+        for lang in ("en", "ja"):
+            g.lang = lang
+            self.draw()
+            g.t0 -= (g.session.end_ms + 1000) / 1000
+            g.update_play()
+            self.assertEqual(g.state, "results")
+            self.draw()
+            g.start_session()
+
+    def test_stress_mode_needs_a_mic(self):
+        g = self.g
+        g.mic.backend = None
+        g.menu_index = game.MENU.index("stress_mode")
+        g.menu_select()
+        self.assertFalse(g.stress_mode)
+        self.fake_mic()
+        g.menu_select()
+        self.assertTrue(g.stress_active)
+        g.mic.backend = None
+        self.assertFalse(g.stress_active)
+
+    def test_every_word_has_a_picture(self):
+        from beatclap import pictures
+        from beatclap.words import WORDS
+        self.assertEqual(set(pictures.PICTURES), set(WORDS))
+        for word in WORDS:
+            self.assertEqual(pictures.render(word, 60).get_size(), (60, 60))
+
     def test_settings_round_trip(self):
         g = self.g
         g.lang, g.offset_ms, g.mic.detector.ratio = "ja", 35, 1.8

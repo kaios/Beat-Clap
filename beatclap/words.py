@@ -39,3 +39,25 @@ def spoken_syllables(word):
     syllables = SPOKEN.get(word, word.lower()).split("-")
     assert len(syllables) == len(word.split("-")), word
     return syllables
+
+# Which syllable carries the primary stress, 0-based, per dictionary pronunciation.
+# Words that aren't listed stress their first syllable, the most common English pattern.
+STRESS = {
+    "BA-NA-NA": 1, "COM-PU-TER": 1, "TO-MA-TO": 1, "PI-AN-O": 1, "KAN-GA-ROO": 2, "VI-O-LIN": 2,
+    "A-MER-I-CA": 1, "AV-O-CA-DO": 2, "IN-FOR-MA-TION": 2, "U-NI-VER-SI-TY": 2,
+    "HIP-PO-POT-A-MUS": 2, "CON-GRAT-U-LA-TIONS": 3, "EN-VI-RON-MENT": 1,
+}
+
+
+def stress_index(word):
+    return STRESS.get(word, 0)
+
+
+def syllable_label(syllable, stressed):
+    """Stressed syllables are written in capitals, the rest in lowercase: ba-NA-na."""
+    return syllable if stressed else syllable.lower()
+
+
+def stressed_spelling(word):
+    index = stress_index(word)
+    return "-".join(syllable_label(s, i == index) for i, s in enumerate(word.split("-")))

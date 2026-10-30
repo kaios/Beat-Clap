@@ -5,7 +5,8 @@ import numpy as np
 from beatclap import core, music, voice
 from beatclap.audio import ClapDetector, hf_rms
 from beatclap.stages import STAGES
-from beatclap.words import WORDS, spoken_syllables
+from beatclap.wordinfo import WORD_INFO
+from beatclap.words import STRESS, WORDS, spoken_syllables, stress_index, stressed_spelling
 
 BLOCK = 0.005  # 5 ms audio blocks
 
@@ -215,10 +216,105 @@ class MicPipelineTest(unittest.TestCase):
                     mic.detector.guard_voice(start, start + len(x) / sr + 0.08)
             mic._ingest(y[i:i + 256].astype(np.float32), t)
             while not mic.claps.empty():
-                heard.append(mic.claps.get())
+                heard.append(mic.claps.get()[0])
         self.assertEqual(len(heard), len(claps), heard)
         for got, want in zip(heard, claps):
             self.assertLess(abs(got - want), 0.01)
+
+    def test_clap_strength_is_measured_and_arrives_after_its_peak(self):
+        from beatclap.audio import MicListener
+        sr, rng = self.SR, np.random.default_rng(4)
+        y = rng.normal(0, 0.001, sr * 3)
+        for t, gain in ((1.0, 0.1), (2.0, 0.4)):
+            c = self.synth_clap(rng) * gain
+            y[int(t * sr): int(t * sr) + len(c)] += c
+        mic = MicListener()
+        got = []
+        for i in range(0, len(y) - 256, 256):
+            mic._ingest(y[i:i + 256].astype(np.float32), i / sr)
+            while not mic.claps.empty():
+                got.append((i / sr, *mic.claps.get()))
+        self.assertEqual(len(got), 2)
+        (seen_a, t_a, soft), (_, t_b, loud) = got
+        self.assertLess(abs(t_a - 1.0), 0.01)
+        self.assertLess(abs(t_b - 2.0), 0.01)
+        self.assertGreater(seen_a, t_a)                         # delivered after the onset
+        self.assertLess(seen_a - t_a, 0.06)
+        self.assertAlmostEqual(loud / soft, 4.0, delta=1.5)     # 4x as hard reads about 4x
+
+
+class StressTest(unittest.TestCase):
+    def word(self, word, *levels):
+        """A finished segment whose syllables got these clap levels (None: missed)."""
+        seg = core.build_chart([word], start_ms=0)[0]
+        for tgt, level in zip(seg.targets, levels):
+            tgt.result, tgt.level = (core.MISS, None) if level is None else (core.PERFECT, level)
+        return seg
+
+    def test_stress_table(self):
+        for word, index in STRESS.items():
+            self.assertIn(word, WORDS)
+            self.assertLess(index, len(word.split("-")), word)
+        self.assertEqual(stressed_spelling("BA-NA-NA"), "ba-NA-na")
+        self.assertEqual(stressed_spelling("RO-BOT"), "RO-bot")
+        self.assertEqual(stressed_spelling("U-NI-VER-SI-TY"), "u-ni-VER-si-ty")
+        self.assertEqual(stressed_spelling("CAT"), "CAT")
+        self.assertEqual(stress_index("WA-TER"), 0)
+
+    def test_chart_marks_exactly_one_stressed_syllable(self):
+        for seg in core.build_chart(WORDS):
+            self.assertEqual(sum(t.stressed for t in seg.targets), 1, seg.word)
+        banana = core.build_chart(["BA-NA-NA"])[0]
+        self.assertEqual([t.stressed for t in banana.targets], [False, True, False])
+
+    def test_verdict(self):
+        self.assertTrue(core.stress_verdict(self.word("BA-NA-NA", 0.1, 0.2, 0.1)))
+        self.assertFalse(core.stress_verdict(self.word("BA-NA-NA", 0.2, 0.2, 0.2)))  # flat
+        self.assertFalse(core.stress_verdict(self.word("BA-NA-NA", 0.3, 0.1, 0.1)))  # wrong one
+        self.assertFalse(core.stress_verdict(self.word("BA-NA-NA", 0.1, None, 0.1)))  # missed it
+        self.assertFalse(core.stress_verdict(self.word("BA-NA-NA", None, 0.2, None)))  # no contrast
+        self.assertIsNone(core.stress_verdict(self.word("CAT", 0.2)))                # one syllable
+
+    def test_keyboard_claps_cannot_be_judged(self):
+        seg = self.word("RO-BOT", 0.2, 0.1)
+        seg.targets[1].level = None
+        self.assertIsNone(core.stress_verdict(seg))
+
+    def test_session_records_level_and_reports_each_word_once(self):
+        s = core.Session(core.build_chart(["RO-BOT"], start_ms=0))
+        s.handle_clap(2400, 0.3)
+        self.assertEqual(s.finished_segments(), [])
+        s.handle_clap(3000, 0.1)
+        self.assertEqual(s.targets[0].level, 0.3)
+        self.assertEqual([seg.word for seg in s.finished_segments()], ["RO-BOT"])
+        self.assertEqual(s.finished_segments(), [])
+        self.assertEqual(s.scorer.score, 2)                     # stress never changes points
+
+    def test_rest_bars_add_room_and_keep_the_grid(self):
+        plain = core.build_chart(["RO-BOT", "CAT"], start_ms=0)
+        rested = core.build_chart(["RO-BOT", "CAT"], start_ms=0, rest_bars=1)
+        self.assertEqual(rested[0].end_ms - plain[0].end_ms, 4 * core.BEAT_MS)
+        self.assertEqual(rested[0].targets[0].time_ms, plain[0].targets[0].time_ms)
+        self.assertEqual(rested[1].start_ms % (4 * core.BEAT_MS), 0)
+
+    def test_guard_scales_with_a_quieter_voice_clip(self):
+        det = ClapDetector()
+        t = warm(det)
+        det.measure_voice(t, t + 0.1)
+        det.process(0.2, t, BLOCK)
+        det.process(0.01, t + 0.2, BLOCK)
+        det.guard_voice(t + 1, t + 2, volume=0.5)               # threshold 0.2 * 1.2 * 0.5
+        self.assertFalse(det.process(0.11, t + 1.1, BLOCK))
+        det.process(0.01, t + 1.2, BLOCK)
+        self.assertTrue(det.process(0.13, t + 1.3, BLOCK))
+
+
+class WordInfoTest(unittest.TestCase):
+    def test_every_word_has_meaning_and_an_example_using_it(self):
+        self.assertEqual(set(WORD_INFO), set(WORDS))
+        for word, info in WORD_INFO.items():
+            self.assertTrue(all(info), word)
+            self.assertIn(word.replace("-", "").lower(), info[2].lower(), word)
 
 
 class MusicTest(unittest.TestCase):
